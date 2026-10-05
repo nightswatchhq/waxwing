@@ -1,0 +1,17 @@
+[package]
+name = "waxwing"
+version = "0.1.0"
+edition = "2024"
+description = "Seal and verify graph-node deployment dumps for handoff between indexers"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
