@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use waxwing::{
-    BlockPtr, Chain, RpcChain, SealOptions, cut, diff, read_catalogue, seal, state, verify,
+    Chain, CutAt, RpcChain, SealOptions, cut, cut_block, diff, is_final, seal, state, verify,
 };
 
 #[derive(Parser)]
@@ -37,6 +37,9 @@ enum Command {
         /// on this chain
         #[arg(long)]
         rpc: Option<String>,
+        /// Fail unless the head is at or below the chain's finalized block
+        #[arg(long, requires = "rpc")]
+        require_final: bool,
     },
     /// Find the first block at which two dumps of one deployment disagree
     Diff {
@@ -52,10 +55,12 @@ enum Command {
         src: PathBuf,
         /// Must be empty or absent
         dst: PathBuf,
+        /// A block number, or `final` for the chain's finalized block
         #[arg(long)]
-        at: i32,
-        /// Ethereum JSON-RPC endpoint to learn the block's hash from;
-        /// not needed when the block is one the source was sealed at
+        at: String,
+        /// Ethereum JSON-RPC endpoint: checks the source is on this chain
+        /// and learns the block's hash. Not needed when the block is one
+        /// the source was sealed at
         #[arg(long)]
         rpc: Option<String>,
     },
@@ -99,22 +104,16 @@ fn main() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Cut { src, dst, at, rpc } => {
-            let sealed = read_catalogue(&src).ok().and_then(|c| {
-                let mut heads = c.layers.into_iter().map(|l| l.head_block);
-                heads.find(|head| head.number == at)
-            });
-            let block = match (sealed, rpc) {
-                (Some(block), _) => block,
-                (None, Some(rpc)) => BlockPtr {
-                    number: at,
-                    hash: RpcChain::new(rpc)
-                        .block_hash(at)?
-                        .with_context(|| format!("the chain has no block {at}"))?,
-                },
-                (None, None) => bail!(
-                    "block {at} is not one the dump was sealed at: pass --rpc to learn its hash"
+            let at = match at.as_str() {
+                "final" => CutAt::Final,
+                number => CutAt::Block(
+                    number
+                        .parse()
+                        .context("--at takes a block number or `final`")?,
                 ),
             };
+            let chain = rpc.map(RpcChain::new);
+            let block = cut_block(&src, at, chain.as_ref().map(|c| c as &dyn Chain))?;
             let result = cut(&src, &dst, block)?;
             println!(
                 "cut at block {} ({}): {} versions, {} dropped, {} reopened",
@@ -170,9 +169,29 @@ fn main() -> Result<ExitCode> {
                 }
             }
         }
-        Command::Verify { dir, rpc } => {
+        Command::Verify {
+            dir,
+            rpc,
+            require_final,
+        } => {
             let chain = rpc.map(RpcChain::new);
-            let (catalogue, problems) = verify(&dir, chain.as_ref().map(|c| c as &dyn Chain))?;
+            let chain = chain.as_ref().map(|c| c as &dyn Chain);
+            let (catalogue, problems) = verify(&dir, chain)?;
+            let mut not_final = false;
+            if let Some(chain) = chain
+                && problems.is_empty()
+            {
+                not_final = !is_final(&catalogue.head_block, chain)?;
+                println!(
+                    "head block {} is {} on this chain",
+                    catalogue.head_block.number,
+                    if not_final { "NOT yet final" } else { "final" }
+                );
+            }
+            if not_final && require_final {
+                eprintln!("a head that is not final can still be reverted");
+                return Ok(ExitCode::FAILURE);
+            }
             if problems.is_empty() {
                 println!(
                     "ok {} at block {}: {} layer(s), {} files, root {}",

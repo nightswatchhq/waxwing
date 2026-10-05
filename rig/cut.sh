@@ -29,4 +29,14 @@ compare $((N - 5)) "$N" $((N + 1)) "$F" "$HEAD"
 dump a rig-a >/dev/null
 dump b rig-b >/dev/null
 waxwing diff work/dumps/rig-a work/dumps/rig-b || fail=1
+
+# A's dump is at the chain head, which can still be reverted. Cut back to
+# the finalized block it is an artefact that cannot.
+waxwing seal work/dumps/rig-a --rpc $RPC >/dev/null
+if waxwing verify work/dumps/rig-a --rpc $RPC --require-final >/dev/null 2>&1; then
+  echo "FAIL: a dump at the chain head verified as final" >&2; fail=1
+fi
+waxwing cut work/dumps/rig-a work/dumps/rig-final --at final --rpc $RPC
+waxwing seal work/dumps/rig-final --rpc $RPC >/dev/null
+waxwing verify work/dumps/rig-final --rpc $RPC --require-final || fail=1
 exit $fail

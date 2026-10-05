@@ -18,10 +18,10 @@ it passes; see below.
 
 ```
 waxwing seal <dump-dir> [--rpc URL] [--graph-node-version V] [--public-poi 0x…]
-waxwing verify <dump-dir> [--rpc URL]
+waxwing verify <dump-dir> [--rpc URL [--require-final]]
 waxwing diff <dump-dir-a> <dump-dir-b> [--at BLOCK]
 waxwing state <dump-dir> [--at BLOCK]
-waxwing cut <src-dump-dir> <dst-dir> --at BLOCK [--rpc URL]
+waxwing cut <src-dump-dir> <dst-dir> --at BLOCK|final [--rpc URL]
 ```
 
 `seal` reads the dump's `metadata.json`, hashes every file it references
@@ -104,8 +104,7 @@ script passes when `waxwing seal --rpc` refuses the directory.
 a layer recording the head it was dumped at, since graphman keeps only the
 latest. With `--rpc`, `seal` and `verify` check every layer's head is still on
 the chain, and `seal` refuses a directory holding a dump it never witnessed.
-A head that is canonical today can still be reorged tomorrow; nothing here
-checks finality yet.
+A head that is canonical today can still be reorged tomorrow; see Finality.
 
 ## Diff
 
@@ -160,9 +159,28 @@ and entities match A at five blocks either side of the cut, and a final
 `diff` of both nodes' dumps is identical at block 104. The cut's state root
 equals `state --at 59` of the uncut dump.
 
-The block hash written into the cut comes from a sealed layer when the block
-is one, and otherwise from `--rpc`; nothing yet checks that hash is the block
-the source actually indexed at that height.
+With `--rpc`, cut first checks that the dump's head and every sealed layer are
+on that chain, so the block it cuts at is an ancestor of what was indexed and
+the chain's hash for it is the right one. Without, it will only cut at a
+block the dump was sealed at.
+
+## Finality
+
+graphman dumps at the chain head, which is never final on a live deployment,
+so refusing to seal a non-final head would refuse everything. Instead:
+
+- `waxwing cut --at final --rpc URL` cuts a dump back to the chain's
+  finalized block. The result holds nothing that can be reverted, and is the
+  thing to publish and to attest a state root for.
+- `waxwing verify --rpc URL` says whether the head is final on the
+  receiver's own chain, and fails on a non-final one with `--require-final`.
+
+A non-final dump is still restorable: graph-node reverts a restored
+deployment like any other if its head is reorged. What it cannot safely take
+is a further incremental layer, which is what the layer check guards.
+
+`rig/cut.sh` ends by cutting A's head dump (block 104) back to anvil's
+finalized block (40): the head dump fails `--require-final`, the cut passes.
 
 ## Indexes
 
@@ -178,10 +196,9 @@ graph-node's restore: create only the indexes in the dump's metadata.
 complain about in graphman. What remains of it:
 
 1. Indexes on restore, as a graph-node patch.
-2. Finality: refuse to seal a head the chain has not finalised.
-3. Diff, state and cut for large tables: bounded memory, sort and merge on
+2. Diff, state and cut for large tables: bounded memory, sort and merge on
    disk. Cut already streams; diff and state do not.
-4. Record the state root in the catalogue at seal, and sign it.
+3. Record the state root in the catalogue at seal, and sign it.
 
 And the experiments still owed: nested data sources (for `parent`), real
 deployments on a real network, restore time per TB, pruning between dumps, a

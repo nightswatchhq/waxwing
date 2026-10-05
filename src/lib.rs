@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 mod cut;
 mod diff;
-pub use cut::{Cut, cut};
+pub use cut::{Cut, CutAt, cut, cut_block};
 pub use diff::{Diff, State, TableDiff, TableState, diff, state};
 
 pub const CATALOGUE_FILE: &str = "catalogue.json";
@@ -98,6 +98,8 @@ pub struct Catalogue {
 pub trait Chain {
     /// Hash of the canonical block at `number`, if the chain has one.
     fn block_hash(&self, number: i32) -> Result<Option<String>>;
+    /// Number of the latest block the chain will not reorg, if it has one.
+    fn finalized(&self) -> Result<Option<i32>>;
 }
 
 pub struct RpcChain {
@@ -110,21 +112,38 @@ impl RpcChain {
     }
 }
 
-impl Chain for RpcChain {
-    fn block_hash(&self, number: i32) -> Result<Option<String>> {
+impl RpcChain {
+    fn block(&self, tag: &str) -> Result<serde_json::Value> {
         let response: serde_json::Value = ureq::post(&self.url)
             .send_json(json!({
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "eth_getBlockByNumber",
-                "params": [format!("0x{number:x}"), false],
+                "params": [tag, false],
             }))
-            .with_context(|| format!("asking {} for block {number}", self.url))?
+            .with_context(|| format!("asking {} for block {tag}", self.url))?
             .into_json()?;
         if let Some(error) = response.get("error") {
-            bail!("{} refused block {number}: {error}", self.url);
+            bail!("{} refused block {tag}: {error}", self.url);
         }
-        Ok(response["result"]["hash"].as_str().map(str::to_string))
+        Ok(response["result"].clone())
+    }
+}
+
+impl Chain for RpcChain {
+    fn block_hash(&self, number: i32) -> Result<Option<String>> {
+        let block = self.block(&format!("0x{number:x}"))?;
+        Ok(block["hash"].as_str().map(str::to_string))
+    }
+
+    fn finalized(&self) -> Result<Option<i32>> {
+        let block = self.block("finalized")?;
+        let Some(number) = block["number"].as_str() else {
+            return Ok(None);
+        };
+        let number = i32::from_str_radix(number.trim_start_matches("0x"), 16)
+            .with_context(|| format!("{} gave block number {number}", self.url))?;
+        Ok(Some(number))
     }
 }
 
@@ -133,9 +152,19 @@ fn same_hash(a: &str, b: &str) -> bool {
     strip(a) == strip(b)
 }
 
+/// Whether `head` is on the chain and at or below its finalized block.
+/// Rows up to a final head cannot be reverted; anything later still can.
+pub fn is_final(head: &BlockPtr, chain: &dyn Chain) -> Result<bool> {
+    let canonical = chain.block_hash(head.number)?;
+    if !canonical.is_some_and(|hash| same_hash(&hash, &head.hash)) {
+        return Ok(false);
+    }
+    Ok(chain.finalized()?.is_some_and(|f| head.number <= f))
+}
+
 /// Layers whose head is no longer on the chain. Everything such a layer
 /// added was indexed on a fork that has since been reverted.
-fn reverted_layers(layers: &[Layer], chain: &dyn Chain) -> Result<Vec<BlockPtr>> {
+pub(crate) fn reverted_layers(layers: &[Layer], chain: &dyn Chain) -> Result<Vec<BlockPtr>> {
     let mut reverted = Vec::new();
     for layer in layers {
         let head = &layer.head_block;
@@ -458,7 +487,7 @@ pub fn verify(dir: &Path, chain: Option<&dyn Chain>) -> Result<(Catalogue, Vec<P
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::HashMap;
     use tempfile::TempDir;
@@ -524,7 +553,8 @@ mod tests {
         dir
     }
 
-    struct FakeChain(HashMap<i32, String>);
+    /// Block hashes by number, and the finalized block.
+    pub(crate) struct FakeChain(pub HashMap<i32, String>, pub Option<i32>);
 
     impl FakeChain {
         fn with(heads: &[i32]) -> Self {
@@ -533,6 +563,7 @@ mod tests {
                     .iter()
                     .map(|h| (*h, format!("0x{}", head_hash(*h))))
                     .collect(),
+                None,
             )
         }
     }
@@ -540,6 +571,10 @@ mod tests {
     impl Chain for FakeChain {
         fn block_hash(&self, number: i32) -> Result<Option<String>> {
             Ok(self.0.get(&number).cloned())
+        }
+
+        fn finalized(&self) -> Result<Option<i32>> {
+            Ok(self.1)
         }
     }
 
@@ -653,6 +688,22 @@ mod tests {
             number: 99,
             hash: head_hash(99)
         })));
+    }
+
+    #[test]
+    fn a_head_is_final_only_on_the_chain_and_under_its_finalized_block() {
+        let head = BlockPtr {
+            number: 99,
+            hash: head_hash(99),
+        };
+        let mut chain = FakeChain::with(&[99]);
+        assert!(!is_final(&head, &chain).unwrap());
+        chain.1 = Some(98);
+        assert!(!is_final(&head, &chain).unwrap());
+        chain.1 = Some(99);
+        assert!(is_final(&head, &chain).unwrap());
+        chain.0.insert(99, "0xdead".into());
+        assert!(!is_final(&head, &chain).unwrap());
     }
 
     #[test]

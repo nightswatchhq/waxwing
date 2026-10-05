@@ -12,7 +12,10 @@ use parquet::file::properties::WriterProperties;
 use serde_json::json;
 
 use super::diff::{batches, clamps, int32};
-use super::{BlockPtr, CATALOGUE_FILE, DumpTable, check_relative, read_metadata};
+use super::{
+    BlockPtr, CATALOGUE_FILE, Chain, DumpTable, Layer, check_relative, read_catalogue,
+    read_metadata, reverted_layers,
+};
 
 const DATA_SOURCES_TABLE: &str = "data_sources$";
 const CHUNK: &str = "chunk_000000.parquet";
@@ -26,6 +29,66 @@ pub struct Cut {
     pub dropped: usize,
     /// Versions closed after the block, written open.
     pub reopened: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CutAt {
+    Block(i32),
+    /// The chain's finalized block, or the dump head if that is lower.
+    Final,
+}
+
+/// Decide the block to cut `src` at, and learn its hash.
+///
+/// With a chain, the dump's head and every sealed layer must be on it, so
+/// the block at any lower height is an ancestor of what was indexed and
+/// the chain's hash for it is the right one. Without, only a block the
+/// dump was sealed at will do, since the catalogue recorded its hash.
+pub fn cut_block(src: &Path, at: CutAt, chain: Option<&dyn Chain>) -> Result<BlockPtr> {
+    let metadata = read_metadata(src)?;
+    let Some(head) = metadata.head_block else {
+        bail!("dump has no head block");
+    };
+    let mut layers = match src.join(CATALOGUE_FILE).exists() {
+        true => read_catalogue(src)?.layers,
+        false => Vec::new(),
+    };
+
+    let Some(chain) = chain else {
+        let sealed = layers.into_iter().map(|l| l.head_block);
+        return match at {
+            CutAt::Block(number) => sealed.clone().find(|h| h.number == number).with_context(|| {
+                format!("block {number} is not one the dump was sealed at: pass --rpc to learn its hash")
+            }),
+            CutAt::Final => bail!("finding the finalized block needs --rpc"),
+        };
+    };
+
+    layers.push(Layer {
+        head_block: head.clone(),
+        files: Vec::new(),
+    });
+    if let Some(gone) = reverted_layers(&layers, chain)?.first() {
+        bail!(
+            "the dump was taken at block {} ({}), which is not on this chain",
+            gone.number,
+            gone.hash
+        );
+    }
+    let number = match at {
+        CutAt::Block(number) => number,
+        CutAt::Final => chain
+            .finalized()?
+            .context("the chain reports no finalized block")?
+            .min(head.number),
+    };
+    if number == head.number {
+        return Ok(head);
+    }
+    let hash = chain
+        .block_hash(number)?
+        .with_context(|| format!("the chain has no block {number}"))?;
+    Ok(BlockPtr { number, hash })
 }
 
 #[derive(Default)]
@@ -214,7 +277,9 @@ pub fn cut(src: &Path, dst: &Path, block: BlockPtr) -> Result<Cut> {
 mod tests {
     use super::*;
     use crate::diff::tests::{BASE, TokenRow, dump};
-    use crate::{diff, state};
+    use crate::tests::FakeChain;
+    use crate::{SealOptions, diff, seal, state};
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     fn ptr(number: i32) -> BlockPtr {
@@ -266,6 +331,53 @@ mod tests {
             table["chunks"],
             json!([{ "file": "Token/chunk_000000.parquet", "min_vid": 1, "max_vid": 3, "row_count": 3 }])
         );
+    }
+
+    /// A chain holding the test dump's head (block 100, hash "aa").
+    fn chain(finalized: Option<i32>) -> FakeChain {
+        let blocks = [(100, "0xAA"), (60, "0x60"), (30, "0x30")];
+        let blocks: HashMap<_, _> = blocks
+            .into_iter()
+            .map(|(n, h)| (n, h.to_string()))
+            .collect();
+        FakeChain(blocks, finalized)
+    }
+
+    #[test]
+    fn final_is_the_finalized_block_but_never_past_the_head() {
+        let src = source();
+        let block = cut_block(src.path(), CutAt::Final, Some(&chain(Some(60)))).unwrap();
+        assert_eq!((block.number, block.hash.as_str()), (60, "0x60"));
+
+        let block = cut_block(src.path(), CutAt::Final, Some(&chain(Some(500)))).unwrap();
+        assert_eq!((block.number, block.hash.as_str()), (100, "aa"));
+
+        assert!(cut_block(src.path(), CutAt::Final, Some(&chain(None))).is_err());
+        assert!(cut_block(src.path(), CutAt::Final, None).is_err());
+    }
+
+    #[test]
+    fn a_dump_from_another_fork_is_not_cut() {
+        let src = source();
+        let mut chain = chain(Some(60));
+        chain.0.insert(100, "0xdead".into());
+        let err = cut_block(src.path(), CutAt::Block(60), Some(&chain)).unwrap_err();
+        assert!(err.to_string().contains("not on this chain"), "{err}");
+    }
+
+    #[test]
+    fn without_a_chain_only_a_sealed_head_has_a_known_hash() {
+        let src = dump(100, &BASE, &[]);
+        assert!(cut_block(src.path(), CutAt::Block(100), None).is_err());
+        fs::write(src.path().join("schema.graphql"), "").unwrap();
+        seal(src.path(), SealOptions::default()).unwrap();
+        assert_eq!(
+            cut_block(src.path(), CutAt::Block(100), None)
+                .unwrap()
+                .number,
+            100
+        );
+        assert!(cut_block(src.path(), CutAt::Block(60), None).is_err());
     }
 
     #[test]
