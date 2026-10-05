@@ -20,6 +20,7 @@ it passes; see below.
 waxwing seal <dump-dir> [--rpc URL] [--graph-node-version V] [--public-poi 0x…]
 waxwing verify <dump-dir> [--rpc URL]
 waxwing diff <dump-dir-a> <dump-dir-b> [--at BLOCK]
+waxwing state <dump-dir> [--at BLOCK]
 ```
 
 `seal` reads the dump's `metadata.json`, hashes every file it references
@@ -122,9 +123,24 @@ shows the child that only ever existed on the reverted fork.
 
 Limits: it holds a 32-byte key per entity version in memory for both sides of
 one table, so it is not yet fit for a table of a billion rows. It refuses
-dumps pruned to different blocks. `data_sources$.parent` is compared as is,
-and may be a `vid` reference that differs between independent indexers; the
-rig cannot tell, because B's rows came from A.
+dumps pruned to different blocks.
+
+## State root
+
+`rig/independent.sh` syncs the subgraph on two nodes that never exchange
+data: B follows the head from early on and lives through a reorg, A syncs the
+whole history afterwards. Their public POIs match and `diff` finds them
+identical. Their dump files do not match byte for byte, and cannot: `vid` is
+a sequence, and B's reorg consumed values A never used (max 93 against 82 in
+one table). So the catalogue root identifies an artefact and nothing more.
+
+`waxwing state` is the thing two indexers can agree on: a hash over every
+entity version as of a block, independent of `vid`, row order, Parquet
+encoding and whether a close arrived in a chunk or a clamp file. On the rig
+the two nodes produce the same state root at their head and at an earlier
+block. This is the state commitment the POI is not, and what multi-party
+attestation would sign. `data_sources$.parent` is still untested: it was null
+in every row the rig produced.
 
 ## Next
 
@@ -135,9 +151,9 @@ complain about in graphman. What it points at, less the diff now built:
    and restore to a chosen block at or below the head. The cut-at-block logic
    is already in diff.
 2. Finality: refuse to seal a head the chain has not finalised.
-3. Diff for large tables: sort and merge on disk instead of hashing in memory.
+3. Diff and state for large tables: sort and merge on disk, not in memory.
+4. Record the state root in the catalogue at seal, and sign it.
 
-And the experiments still owed: two independently synced nodes (the real test
-of diff, and of whether `vid` and `parent` are deterministic), real
+And the experiments still owed: nested data sources (for `parent`), real
 deployments on a real network, restore time per TB, pruning between dumps, a
 grafted deployment.

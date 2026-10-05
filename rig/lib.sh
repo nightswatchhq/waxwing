@@ -5,7 +5,7 @@ FACTORY=0x5FbDB2315678afecb367f032d93F642f64180aa3
 NAME=rig/test
 DUMP=work/dumps/rig
 A_QUERY=http://localhost:18000 A_ADMIN=http://localhost:18020 A_INDEX=http://localhost:18030
-B_QUERY=http://localhost:28000 B_INDEX=http://localhost:28030
+B_QUERY=http://localhost:28000 B_ADMIN=http://localhost:28020 B_INDEX=http://localhost:28030
 
 waxwing() { cargo run -q --manifest-path ../Cargo.toml -- "$@"; }
 gql() { curl -sf "$1" -H 'content-type: application/json' -d "$(jq -n --arg q "$2" '{query: $q}')"; }
@@ -75,8 +75,8 @@ restore() {
   wait_http $B_INDEX
 }
 
-# Fresh stack, factory deployed, two children with 60 pings, subgraph on A.
-setup() {
+# Fresh stack with the factory deployed and nothing indexing.
+stack_up() {
   docker compose down -v >/dev/null 2>&1
   rm -rf work/dumps && mkdir -p work/dumps
   docker compose up -d >/dev/null 2>&1
@@ -84,11 +84,20 @@ setup() {
 
   forge create --root contracts --rpc-url $RPC --private-key $KEY --broadcast src/Rig.sol:Factory >/dev/null
   [ "$(cast code --rpc-url $RPC $FACTORY)" != 0x ] || { echo "factory not at $FACTORY" >&2; exit 1; }
+}
 
+# deploy <admin url> <index url>: hand the subgraph to a node to index itself.
+deploy() {
+  (cd subgraph && graph create --node "$1" $NAME >/dev/null 2>&1 &&
+    graph deploy $NAME --node "$1" --ipfs http://localhost:15001 --version-label v1 >/dev/null 2>&1)
+  DEPLOYMENT=$(gql "$2/graphql" '{ indexingStatuses { subgraph } }' | jq -r '.data.indexingStatuses[0].subgraph')
+}
+
+# Fresh stack, two children with 60 pings, subgraph synced on A.
+setup() {
+  stack_up
   spawn; pings 30; spawn; pings 30
-  (cd subgraph && graph create --node $A_ADMIN $NAME >/dev/null 2>&1 &&
-    graph deploy $NAME --node $A_ADMIN --ipfs http://localhost:15001 --version-label v1 >/dev/null 2>&1)
-  DEPLOYMENT=$(gql $A_INDEX/graphql '{ indexingStatuses { subgraph } }' | jq -r '.data.indexingStatuses[0].subgraph')
+  deploy $A_ADMIN $A_INDEX
   echo "deployment $DEPLOYMENT"
   wait_synced $A_INDEX
 }

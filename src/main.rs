@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use waxwing::{Chain, RpcChain, SealOptions, diff, seal, verify};
+use waxwing::{Chain, RpcChain, SealOptions, diff, seal, state, verify};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -44,6 +44,14 @@ enum Command {
         #[arg(long)]
         at: Option<i32>,
     },
+    /// Hash a dump's entity versions as of a block, independent of vid,
+    /// row order and encoding: what two indexers should agree on
+    State {
+        dir: PathBuf,
+        /// Hash the state as of this block rather than the dump head
+        #[arg(long)]
+        at: Option<i32>,
+    },
 }
 
 fn main() -> Result<ExitCode> {
@@ -73,6 +81,20 @@ fn main() -> Result<ExitCode> {
                 bytes
             );
             println!("root {}", catalogue.root);
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::State { dir, at } => {
+            let state = state(&dir, at)?;
+            for table in &state.tables {
+                println!(
+                    "{:<20} {} {} versions",
+                    table.table, table.root, table.versions
+                );
+            }
+            println!(
+                "state {} at block {}: {}",
+                state.deployment, state.block, state.root
+            );
             Ok(ExitCode::SUCCESS)
         }
         Command::Diff { a, b, at } => {

@@ -230,6 +230,87 @@ fn samples(
     Ok(out)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableState {
+    pub table: String,
+    pub versions: usize,
+    pub root: String,
+}
+
+/// A commitment to a deployment's entity versions as of one block. Unlike
+/// the catalogue root it does not depend on `vid`, row order or Parquet
+/// encoding, so independent indexers can be expected to agree on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct State {
+    pub deployment: String,
+    pub block: i32,
+    pub tables: Vec<TableState>,
+    pub root: String,
+}
+
+/// Hash a dump's entity versions as they stood at `at` (default: its head).
+pub fn state(dir: &Path, at: Option<i32>) -> Result<State> {
+    let metadata = read_metadata(dir)?;
+    let Some(head) = metadata.head_block.as_ref().map(|h| h.number) else {
+        bail!("a dump without a head block has no state");
+    };
+    let block = at.unwrap_or(head);
+    if block > head {
+        bail!("block {block} is beyond the dump head {head}");
+    }
+    if block < metadata.earliest_block_number {
+        bail!(
+            "block {block} is before the dump's earliest block {}",
+            metadata.earliest_block_number
+        );
+    }
+
+    let mut all = Sha256::new();
+    all.update(b"waxwing-state-v1\0");
+    all.update(metadata.deployment.as_bytes());
+    all.update(block.to_be_bytes());
+
+    let mut tables = Vec::new();
+    for (name, table) in &metadata.tables {
+        let mut shape = None;
+        let mut leaves: Vec<Key> = Vec::new();
+        visit(dir, table, block, &mut shape, |row| {
+            let mut leaf = Sha256::new();
+            leaf.update(row.key);
+            match row.end {
+                Some(end) => leaf.update(end.to_be_bytes()),
+                None => leaf.update(b"open"),
+            }
+            leaves.push(leaf.finalize().into());
+            Ok(())
+        })
+        .with_context(|| format!("reading {name}"))?;
+        leaves.sort_unstable();
+
+        let mut hasher = Sha256::new();
+        for (column, data_type) in shape.iter().flatten() {
+            hasher.update(format!("{column}:{data_type}\0"));
+        }
+        for leaf in &leaves {
+            hasher.update(leaf);
+        }
+        let root = hex::encode(hasher.finalize());
+        all.update(format!("\0{name}\0{root}"));
+        tables.push(TableState {
+            table: name.clone(),
+            versions: leaves.len(),
+            root,
+        });
+    }
+
+    Ok(State {
+        deployment: metadata.deployment,
+        block,
+        tables,
+        root: hex::encode(all.finalize()),
+    })
+}
+
 /// Compare two dumps of one deployment, version by version, as both stood
 /// at `at` (default: the lower of the two heads).
 ///
@@ -493,6 +574,64 @@ mod tests {
         assert_eq!(diff.block, 80);
         assert_eq!(diff.first(), None);
         assert_eq!(diff.tables[0].versions, [3, 3]);
+    }
+
+    #[test]
+    fn state_ignores_vid_order_and_how_a_close_was_recorded() {
+        let a = dump(100, &BASE, &[]);
+        let b = dump(
+            100,
+            &[
+                (70, 20, None, "b", 7),
+                (80, 50, None, "a", 2),
+                (90, 10, None, "a", 1),
+            ],
+            &[(90, 50)],
+        );
+        let (a, b) = (
+            state(a.path(), None).unwrap(),
+            state(b.path(), None).unwrap(),
+        );
+        assert_eq!(a, b);
+        assert_eq!(a.tables[0].versions, 3);
+    }
+
+    #[test]
+    fn state_changes_with_a_value_a_close_or_the_block() {
+        let base = state(dump(100, &BASE, &[]).path(), None).unwrap().root;
+
+        let mut rows = BASE;
+        rows[2].4 = 8;
+        assert_ne!(
+            state(dump(100, &rows, &[]).path(), None).unwrap().root,
+            base
+        );
+
+        let mut rows = BASE;
+        rows[2].2 = Some(70);
+        assert_ne!(
+            state(dump(100, &rows, &[]).path(), None).unwrap().root,
+            base
+        );
+
+        assert_ne!(
+            state(dump(101, &BASE, &[]).path(), None).unwrap().root,
+            base
+        );
+    }
+
+    #[test]
+    fn state_of_a_longer_dump_cut_back_matches_the_shorter_one() {
+        let short = dump(80, &BASE, &[]);
+        let mut rows = BASE.to_vec();
+        rows[2].2 = Some(90);
+        rows.push((4, 90, None, "b", 9));
+        let long = dump(100, &rows, &[]);
+        assert_eq!(
+            state(long.path(), Some(80)).unwrap(),
+            state(short.path(), None).unwrap()
+        );
+        assert!(state(long.path(), Some(101)).is_err());
     }
 
     #[test]

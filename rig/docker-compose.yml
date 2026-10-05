@@ -41,7 +41,7 @@ services:
   graph-node-b:
     <<: *graph-node
     depends_on: [anvil, ipfs, postgres-b]
-    ports: ["28000:8000", "28030:8030"]
+    ports: ["28000:8000", "28020:8020", "28030:8030"]
     environment:
       <<: *graph-node-env
       GRAPH_NODE_CONFIG: /config/b.toml

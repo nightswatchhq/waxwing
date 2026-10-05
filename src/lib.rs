@@ -9,7 +9,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 mod diff;
-pub use diff::{Diff, TableDiff, diff};
+pub use diff::{Diff, State, TableDiff, TableState, diff, state};
 
 pub const CATALOGUE_FILE: &str = "catalogue.json";
 pub const CATALOGUE_VERSION: u32 = 1;
