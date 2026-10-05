@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use waxwing::{SealOptions, seal, verify};
+use waxwing::{Chain, RpcChain, SealOptions, seal, verify};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -23,9 +23,19 @@ enum Command {
         /// Public POI at the dump's head block
         #[arg(long)]
         public_poi: Option<String>,
+        /// Ethereum JSON-RPC endpoint; refuse if any dump was taken on a
+        /// fork this chain has reverted
+        #[arg(long)]
+        rpc: Option<String>,
     },
     /// Re-hash a sealed dump directory against its catalogue.json
-    Verify { dir: PathBuf },
+    Verify {
+        dir: PathBuf,
+        /// Ethereum JSON-RPC endpoint; also check that every dump was taken
+        /// on this chain
+        #[arg(long)]
+        rpc: Option<String>,
+    },
 }
 
 fn main() -> Result<ExitCode> {
@@ -34,12 +44,15 @@ fn main() -> Result<ExitCode> {
             dir,
             graph_node_version,
             public_poi,
+            rpc,
         } => {
+            let chain = rpc.map(RpcChain::new);
             let catalogue = seal(
                 &dir,
                 SealOptions {
                     graph_node_version,
                     public_poi,
+                    chain: chain.as_ref().map(|c| c as &dyn Chain),
                 },
             )?;
             let bytes: u64 = catalogue.files.iter().map(|f| f.bytes).sum();
@@ -54,13 +67,15 @@ fn main() -> Result<ExitCode> {
             println!("root {}", catalogue.root);
             Ok(ExitCode::SUCCESS)
         }
-        Command::Verify { dir } => {
-            let (catalogue, problems) = verify(&dir)?;
+        Command::Verify { dir, rpc } => {
+            let chain = rpc.map(RpcChain::new);
+            let (catalogue, problems) = verify(&dir, chain.as_ref().map(|c| c as &dyn Chain))?;
             if problems.is_empty() {
                 println!(
-                    "ok {} at block {}: {} files, root {}",
+                    "ok {} at block {}: {} layer(s), {} files, root {}",
                     catalogue.deployment,
                     catalogue.head_block.number,
+                    catalogue.layers.len(),
                     catalogue.files.len(),
                     catalogue.root
                 );
