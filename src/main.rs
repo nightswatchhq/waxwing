@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use waxwing::{Chain, RpcChain, SealOptions, seal, verify};
+use waxwing::{Chain, RpcChain, SealOptions, diff, seal, verify};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -36,6 +36,14 @@ enum Command {
         #[arg(long)]
         rpc: Option<String>,
     },
+    /// Find the first block at which two dumps of one deployment disagree
+    Diff {
+        a: PathBuf,
+        b: PathBuf,
+        /// Compare as of this block rather than the lower of the two heads
+        #[arg(long)]
+        at: Option<i32>,
+    },
 }
 
 fn main() -> Result<ExitCode> {
@@ -66,6 +74,36 @@ fn main() -> Result<ExitCode> {
             );
             println!("root {}", catalogue.root);
             Ok(ExitCode::SUCCESS)
+        }
+        Command::Diff { a, b, at } => {
+            let diff = diff(&a, &b, at)?;
+            println!("comparing {} as of block {}", diff.deployment, diff.block);
+            for table in &diff.tables {
+                let Some(first) = table.first_block else {
+                    println!(
+                        "{:<20} identical, {} versions",
+                        table.table, table.versions[0]
+                    );
+                    continue;
+                };
+                println!(
+                    "{:<20} DIVERGES at block {first}: {} only in A, {} only in B, {} closed differently",
+                    table.table, table.only[0], table.only[1], table.closed_differently
+                );
+                for sample in &table.samples {
+                    println!("    {sample}");
+                }
+            }
+            match diff.first() {
+                None => {
+                    println!("identical");
+                    Ok(ExitCode::SUCCESS)
+                }
+                Some((block, table)) => {
+                    println!("first divergence at block {block}, in {table}");
+                    Ok(ExitCode::FAILURE)
+                }
+            }
         }
         Command::Verify { dir, rpc } => {
             let chain = rpc.map(RpcChain::new);

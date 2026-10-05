@@ -17,8 +17,9 @@ hashed catalogue. `rig/run.sh` is the first kill experiment in miniature, and
 it passes; see below.
 
 ```
-waxwing seal <dump-dir> [--graph-node-version V] [--public-poi 0x…]
-waxwing verify <dump-dir>
+waxwing seal <dump-dir> [--rpc URL] [--graph-node-version V] [--public-poi 0x…]
+waxwing verify <dump-dir> [--rpc URL]
+waxwing diff <dump-dir-a> <dump-dir-b> [--at BLOCK]
 ```
 
 `seal` reads the dump's `metadata.json`, hashes every file it references
@@ -104,16 +105,39 @@ the chain, and `seal` refuses a directory holding a dump it never witnessed.
 A head that is canonical today can still be reorged tomorrow; nothing here
 checks finality yet.
 
+## Diff
+
+`waxwing diff` compares two dumps of one deployment from the files alone, as
+both stood at the lower of their heads, and names the first block at which
+they disagree, per table, with a few of the offending versions. It ignores
+`vid` and row order, applies clamp files, and treats `Poi$` and
+`data_sources$` as tables like any other, so a POI divergence shows up as a
+block number. Neither party needs access to the other's node, which is what
+graph-node#6694 asks for and cannot have through the status API.
+
+On the rig: a dump of A against a dump of the copy restored into B is
+identical across all five tables at block 125. After the reorg experiment it
+reports the first divergence at block 64, the block after the fork point, and
+shows the child that only ever existed on the reverted fork.
+
+Limits: it holds a 32-byte key per entity version in memory for both sides of
+one table, so it is not yet fit for a table of a billion rows. It refuses
+dumps pruned to different blocks. `data_sources$.parent` is compared as is,
+and may be a `vid` reference that differs between independent indexers; the
+rig cannot tell, because B's rows came from A.
+
 ## Next
 
 [docs/graphman-issues.md](docs/graphman-issues.md) is a scan of what operators
-complain about in graphman. It points at three things to build, in this order:
+complain about in graphman. What it points at, less the diff now built:
 
-1. `waxwing diff`: first block at which two dumps, or a dump and a live
-   deployment, part ways.
-2. Restore with the catalogue's recorded indexes rather than the default set,
-   and restore to a chosen block at or below the head.
-3. Finality: refuse to seal a head the chain has not finalised.
+1. Restore with the catalogue's recorded indexes rather than the default set,
+   and restore to a chosen block at or below the head. The cut-at-block logic
+   is already in diff.
+2. Finality: refuse to seal a head the chain has not finalised.
+3. Diff for large tables: sort and merge on disk instead of hashing in memory.
 
-And the experiments still owed: real deployments on a real network, restore
-time per TB, pruning between dumps, a grafted deployment.
+And the experiments still owed: two independently synced nodes (the real test
+of diff, and of whether `vid` and `parent` are deterministic), real
+deployments on a real network, restore time per TB, pruning between dumps, a
+grafted deployment.

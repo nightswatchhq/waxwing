@@ -37,3 +37,10 @@ echo "restoring it anyway:"
 compare "$S" "$F1" "$F2" "$(head_block)" >work/compare.txt 2>/dev/null
 grep -v '^  ' work/compare.txt
 [ $fail = 1 ] || { echo "FAIL: expected the restored copy to diverge" >&2; exit 1; }
+
+# And from the files alone: a fresh dump of A against a dump of B.
+dump a rig-a-fresh >/dev/null
+dump b rig-b >/dev/null
+if waxwing diff work/dumps/rig-a-fresh work/dumps/rig-b; then
+  echo "FAIL: diff found nothing" >&2; exit 1
+fi

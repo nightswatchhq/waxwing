@@ -23,4 +23,11 @@ spawn; pings 30
 wait_synced $A_INDEX; wait_synced $B_INDEX
 
 compare $((F1 - 10)) "$F1" $((F2 - 10)) "$F2" "$(head_block)"
+
+# The same question asked of the files alone: A's third layer against a
+# dump of the restored copy.
+dump a rig >/dev/null
+waxwing seal $DUMP --rpc $RPC >/dev/null
+dump b rig-b >/dev/null
+waxwing diff $DUMP work/dumps/rig-b || fail=1
 exit $fail

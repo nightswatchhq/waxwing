@@ -61,9 +61,11 @@ entities() {
   }" | jq -ecS 'if .errors then error(.errors | tostring) else .data end'
 }
 
+# dump [node] [directory under work/dumps]; prints the head it was taken at.
 dump() {
-  docker compose exec -T graph-node-a graphman --config /config/a.toml dump "$DEPLOYMENT" /dumps/rig >/dev/null
-  jq .head_block.number $DUMP/metadata.json
+  local node=${1:-a} name=${2:-rig}
+  docker compose exec -T graph-node-$node graphman --config /config/$node.toml dump "$DEPLOYMENT" /dumps/$name >/dev/null
+  jq .head_block.number work/dumps/$name/metadata.json
 }
 
 restore() {
