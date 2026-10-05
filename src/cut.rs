@@ -91,6 +91,13 @@ pub fn cut_block(src: &Path, at: CutAt, chain: Option<&dyn Chain>) -> Result<Blo
     Ok(BlockPtr { number, hash })
 }
 
+/// The block a dump was taken at.
+pub fn dump_head(dir: &Path) -> Result<BlockPtr> {
+    read_metadata(dir)?
+        .head_block
+        .context("dump has no head block")
+}
+
 #[derive(Default)]
 struct TableCut {
     versions: usize,
@@ -378,6 +385,30 @@ mod tests {
             100
         );
         assert!(cut_block(src.path(), CutAt::Block(60), None).is_err());
+    }
+
+    #[test]
+    fn a_sealed_state_root_is_checked_against_the_rows() {
+        let src = dump(100, &BASE, &[]);
+        fs::write(src.path().join("schema.graphql"), "").unwrap();
+        let options = SealOptions {
+            state: true,
+            ..Default::default()
+        };
+        let mut catalogue = seal(src.path(), options).unwrap();
+        assert_eq!(
+            catalogue.state_root,
+            Some(state(src.path(), None).unwrap().root)
+        );
+        assert_eq!(crate::verify(src.path(), None).unwrap().1, []);
+
+        catalogue.state_root = Some("00".into());
+        let json = serde_json::to_vec(&catalogue).unwrap();
+        fs::write(src.path().join(CATALOGUE_FILE), json).unwrap();
+        assert_eq!(
+            crate::verify(src.path(), None).unwrap().1,
+            [crate::Problem::State]
+        );
     }
 
     #[test]

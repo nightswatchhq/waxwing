@@ -17,11 +17,13 @@ hashed catalogue. `rig/run.sh` is the first kill experiment in miniature, and
 it passes; see below.
 
 ```
-waxwing seal <dump-dir> [--rpc URL] [--graph-node-version V] [--public-poi 0x…]
+waxwing seal <dump-dir> [--rpc URL] [--no-state] [--graph-node-version V] [--public-poi 0x…]
 waxwing verify <dump-dir> [--rpc URL [--require-final]]
 waxwing diff <dump-dir-a> <dump-dir-b> [--at BLOCK]
 waxwing state <dump-dir> [--at BLOCK]
 waxwing cut <src-dump-dir> <dst-dir> --at BLOCK|final [--rpc URL]
+waxwing attest <own-dump-dir> --key-file FILE [--at BLOCK|final] [--rpc URL]
+waxwing attested <dump-dir> <attestation.json>... [--signer 0x…]... [--threshold K]
 ```
 
 `seal` reads the dump's `metadata.json`, hashes every file it references
@@ -142,6 +144,29 @@ block. This is the state commitment the POI is not, and what multi-party
 attestation would sign. `data_sources$.parent` is still untested: it was null
 in every row the rig produced.
 
+`seal` records the state root at the head in the catalogue, and `verify`
+recomputes it from the rows. `--no-state` skips it for dumps too large to
+hash in memory.
+
+## Attestation
+
+An indexer who synced the deployment itself runs `waxwing attest` on its own
+dump: the state root as of a block, signed as an Ethereum personal message
+with any secp256k1 key, so the signer is an address and `cast wallet verify`
+accepts the signature. The receiver of somebody else's dump runs
+`waxwing attested` with the attestations it has collected and the addresses
+it is prepared to believe, and gets a count of distinct signers who agree
+with the catalogue's deployment, block and state root.
+
+`rig/independent.sh` ends with B attesting to its own copy and A's sealed
+dump passing against it, and failing against a signer who did not sign.
+
+What this does not do: decide who is worth believing. Without `--signer`
+every key counts, and keys are free. Tying a signer to an indexer with stake
+on the network is not built, nor is any way to publish or find attestations.
+The attester and the dump must be at the same block, which is what
+`cut --at final` and `attest --at` are for.
+
 ## Cut
 
 `waxwing cut` writes the dump a deployment would have had at an earlier
@@ -198,7 +223,8 @@ complain about in graphman. What remains of it:
 1. Indexes on restore, as a graph-node patch.
 2. Diff, state and cut for large tables: bounded memory, sort and merge on
    disk. Cut already streams; diff and state do not.
-3. Record the state root in the catalogue at seal, and sign it.
+3. Attestations: check a signer is an indexer or its operator on the
+   network, and somewhere to publish and find them.
 
 And the experiments still owed: nested data sources (for `parent`), real
 deployments on a real network, restore time per TB, pruning between dumps, a

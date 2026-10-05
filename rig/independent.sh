@@ -36,4 +36,15 @@ waxwing diff work/dumps/rig-a work/dumps/rig-b || fail=1
 root() { waxwing "$1" "$2" | tail -1 | awk '{print $NF}'; }
 check "state root at $HEAD" "$(root state work/dumps/rig-a)" "$(root state work/dumps/rig-b)"
 [ "$(root seal work/dumps/rig-a)" != "$(root seal work/dumps/rig-b)" ] || echo "note: catalogue roots match too"
+
+# B signs the state of its own copy with anvil's second key; A's sealed dump
+# is then checked against that attestation, and against the wrong signer.
+echo 0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d > work/key-b
+waxwing attest work/dumps/rig-b --key-file work/key-b > work/attestation-b.json
+waxwing attested work/dumps/rig-a work/attestation-b.json \
+  --signer 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 || fail=1
+if waxwing attested work/dumps/rig-a work/attestation-b.json \
+  --signer 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 >/dev/null; then
+  echo "FAIL: an attestation counted for a signer who did not make it" >&2; fail=1
+fi
 exit $fail

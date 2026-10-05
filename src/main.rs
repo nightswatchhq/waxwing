@@ -4,7 +4,8 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use waxwing::{
-    Chain, CutAt, RpcChain, SealOptions, cut, cut_block, diff, is_final, seal, state, verify,
+    Attestation, Chain, CutAt, RpcChain, SealOptions, attest, cut, cut_block, diff, is_final,
+    read_catalogue, seal, state, tally, verify,
 };
 
 #[derive(Parser)]
@@ -29,6 +30,36 @@ enum Command {
         /// fork this chain has reverted
         #[arg(long)]
         rpc: Option<String>,
+        /// Do not record the state root, which reads every row into memory
+        #[arg(long)]
+        no_state: bool,
+    },
+    /// Sign the state root of your own dump of a deployment, as of a block
+    Attest {
+        dir: PathBuf,
+        /// File holding a hex secp256k1 private key, such as an operator key
+        #[arg(long)]
+        key_file: PathBuf,
+        /// A block number, or `final`; the dump head when omitted
+        #[arg(long)]
+        at: Option<String>,
+        /// Ethereum JSON-RPC endpoint, needed for a block below the head
+        #[arg(long)]
+        rpc: Option<String>,
+    },
+    /// Count the signers whose attestations agree with a sealed dump
+    Attested {
+        dir: PathBuf,
+        /// Attestation files, as written by `attest`
+        #[arg(required = true)]
+        attestations: Vec<PathBuf>,
+        /// Count only these addresses; repeat for each. Without it any key
+        /// counts, which proves nothing about who signed
+        #[arg(long)]
+        signer: Vec<String>,
+        /// Fail unless at least this many distinct signers agree
+        #[arg(long, default_value_t = 1)]
+        threshold: usize,
     },
     /// Re-hash a sealed dump directory against its catalogue.json
     Verify {
@@ -81,6 +112,7 @@ fn main() -> Result<ExitCode> {
             graph_node_version,
             public_poi,
             rpc,
+            no_state,
         } => {
             let chain = rpc.map(RpcChain::new);
             let catalogue = seal(
@@ -89,6 +121,7 @@ fn main() -> Result<ExitCode> {
                     graph_node_version,
                     public_poi,
                     chain: chain.as_ref().map(|c| c as &dyn Chain),
+                    state: !no_state,
                 },
             )?;
             let bytes: u64 = catalogue.files.iter().map(|f| f.bytes).sum();
@@ -100,8 +133,98 @@ fn main() -> Result<ExitCode> {
                 catalogue.files.len(),
                 bytes
             );
+            if let Some(state_root) = &catalogue.state_root {
+                println!("state {state_root}");
+            }
             println!("root {}", catalogue.root);
             Ok(ExitCode::SUCCESS)
+        }
+        Command::Attest {
+            dir,
+            key_file,
+            at,
+            rpc,
+        } => {
+            let at = match at.as_deref() {
+                None => None,
+                Some("final") => Some(CutAt::Final),
+                Some(number) => Some(CutAt::Block(
+                    number
+                        .parse()
+                        .context("--at takes a block number or `final`")?,
+                )),
+            };
+            let chain = rpc.map(RpcChain::new);
+            let chain = chain.as_ref().map(|c| c as &dyn Chain);
+            let state = match at {
+                Some(at) => state(&dir, Some(cut_block(&dir, at, chain)?.number))?,
+                None => state(&dir, None)?,
+            };
+            let block = cut_block(&dir, CutAt::Block(state.block), chain).or_else(|e| {
+                // The head's hash is in the dump itself; anything lower is not.
+                let head = waxwing::dump_head(&dir)?;
+                if head.number == state.block {
+                    Ok(head)
+                } else {
+                    Err(e)
+                }
+            })?;
+            let key = std::fs::read_to_string(&key_file)
+                .with_context(|| format!("reading {}", key_file.display()))?;
+            let attestation = attest(&key, &state.deployment, &block, &state.root)?;
+            println!("{}", serde_json::to_string_pretty(&attestation)?);
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Attested {
+            dir,
+            attestations,
+            signer,
+            threshold,
+        } => {
+            let catalogue = read_catalogue(&dir)?;
+            let state_root = catalogue
+                .state_root
+                .context("the catalogue records no state root: seal without --no-state")?;
+            let expected = Attestation {
+                version: 1,
+                deployment: catalogue.deployment,
+                block: catalogue.head_block,
+                state_root,
+                signer: String::new(),
+                signature: String::new(),
+            };
+            let mut read = Vec::new();
+            for path in &attestations {
+                let raw =
+                    std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+                let attestation: Attestation = serde_json::from_slice(&raw)
+                    .with_context(|| format!("parsing {}", path.display()))?;
+                read.push(attestation);
+            }
+            let signers = tally(&expected, &read, &signer);
+            for address in &signers {
+                println!("agrees: {address}");
+            }
+            println!(
+                "{} of {} attestation(s) agree on state {} at block {}, from {} signer(s); need {threshold}",
+                read.iter()
+                    .filter(|a| a.recover().is_ok_and(|s| signers.contains(&s)))
+                    .count(),
+                read.len(),
+                expected.state_root,
+                expected.block.number,
+                signers.len()
+            );
+            if signer.is_empty() {
+                println!(
+                    "no --signer given: any key counts, so this shows agreement, not who agrees"
+                );
+            }
+            Ok(if signers.len() >= threshold {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
         }
         Command::Cut { src, dst, at, rpc } => {
             let at = match at.as_str() {

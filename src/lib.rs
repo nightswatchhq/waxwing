@@ -8,9 +8,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+mod attest;
 mod cut;
+pub use attest::{Attestation, attest, statement, tally};
 mod diff;
-pub use cut::{Cut, CutAt, cut, cut_block};
+pub use cut::{Cut, CutAt, cut, cut_block, dump_head};
 pub use diff::{Diff, State, TableDiff, TableState, diff, state};
 
 pub const CATALOGUE_FILE: &str = "catalogue.json";
@@ -85,6 +87,9 @@ pub struct Catalogue {
     pub graft_block: Option<BlockPtr>,
     pub graph_node_version: Option<String>,
     pub public_poi: Option<String>,
+    /// `state` of the dump at `head_block`: what other indexers attest to.
+    #[serde(default)]
+    pub state_root: Option<String>,
     /// Oldest first; the last layer's head is `head_block`.
     pub layers: Vec<Layer>,
     /// Sorted by path.
@@ -182,6 +187,8 @@ pub struct SealOptions<'a> {
     pub public_poi: Option<String>,
     /// When given, every layer's head must still be on this chain.
     pub chain: Option<&'a dyn Chain>,
+    /// Record the state root. Reads every row of the dump.
+    pub state: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,6 +207,8 @@ pub enum Problem {
     Reverted(BlockPtr),
     /// The layers do not end at the catalogue's head block.
     Layers,
+    /// The rows do not hash to the catalogue's state root.
+    State,
 }
 
 impl std::fmt::Display for Problem {
@@ -220,6 +229,7 @@ impl std::fmt::Display for Problem {
                 head.number, head.hash
             ),
             Problem::Layers => write!(f, "layers do not end at the catalogue's head block"),
+            Problem::State => write!(f, "the rows do not hash to the catalogue's state root"),
         }
     }
 }
@@ -403,6 +413,10 @@ pub fn seal(dir: &Path, opts: SealOptions) -> Result<Catalogue> {
         graft_block: metadata.graft_block,
         graph_node_version: opts.graph_node_version,
         public_poi: opts.public_poi,
+        state_root: match opts.state {
+            true => Some(state(dir, None)?.root),
+            false => None,
+        },
         layers,
         root: root(&files),
         files,
@@ -481,6 +495,14 @@ pub fn verify(dir: &Path, chain: Option<&dyn Chain>) -> Result<(Catalogue, Vec<P
         }
     } else if metadata_ok {
         problems.push(Problem::Missing(METADATA_FILE.to_string()));
+    }
+
+    // Only once the bytes are known good: a damaged file may not parse.
+    if problems.is_empty()
+        && let Some(root) = &catalogue.state_root
+        && state(dir, None)?.root != *root
+    {
+        problems.push(Problem::State);
     }
 
     Ok((catalogue, problems))
