@@ -89,14 +89,31 @@ mention: `graphman create <name>` on the receiver before `restore --name`,
 and the receiver must be able to fetch the manifest and WASM from IPFS, since
 the dump carries neither.
 
+`rig/reorg.sh` puts a reorg between the full dump and the incremental one.
+graphman accepts it, because the head number advanced, and the restored copy
+is corrupt: an entity from the reverted fork, two live versions of one entity,
+and diverging POIs, although the POI at the dump head still matches. The
+script passes when `waxwing seal --rpc` refuses the directory.
+
+## Layers
+
+`seal` must run after every `graphman dump` into a directory. Each run becomes
+a layer recording the head it was dumped at, since graphman keeps only the
+latest. With `--rpc`, `seal` and `verify` check every layer's head is still on
+the chain, and `seal` refuses a directory holding a dump it never witnessed.
+A head that is canonical today can still be reorged tomorrow; nothing here
+checks finality yet.
+
 ## Next
 
-1. The same experiment against real deployments with factories, account-like
-   tables and fulltext, and a real network to compare public POIs with. Needs
-   a graph-node at v0.42 or later holding synced deployments.
-2. Time restore and index build per TB against a sync.
-3. Dump the same final window twice a week apart and diff the rows.
-4. Extend the rig: a reorg between two incremental dumps (anvil can do it),
-   pruning between dumps, a grafted deployment.
+[docs/graphman-issues.md](docs/graphman-issues.md) is a scan of what operators
+complain about in graphman. It points at three things to build, in this order:
 
-Then: have `seal` fetch the public POI from the index-node itself.
+1. `waxwing diff`: first block at which two dumps, or a dump and a live
+   deployment, part ways.
+2. Restore with the catalogue's recorded indexes rather than the default set,
+   and restore to a chosen block at or below the head.
+3. Finality: refuse to seal a head the chain has not finalised.
+
+And the experiments still owed: real deployments on a real network, restore
+time per TB, pruning between dumps, a grafted deployment.
