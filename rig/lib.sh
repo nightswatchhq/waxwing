@@ -68,9 +68,10 @@ dump() {
   jq .head_block.number work/dumps/$name/metadata.json
 }
 
+# restore [directory under work/dumps] into B.
 restore() {
   docker compose exec -T graph-node-b graphman --config /config/b.toml create $NAME >/dev/null
-  docker compose exec -T graph-node-b graphman --config /config/b.toml restore /dumps/rig --name $NAME >/dev/null
+  docker compose exec -T graph-node-b graphman --config /config/b.toml restore /dumps/${1:-rig} --name $NAME >/dev/null
   docker compose restart graph-node-b >/dev/null 2>&1
   wait_http $B_INDEX
 }

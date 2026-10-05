@@ -65,28 +65,25 @@ impl Diff {
     }
 }
 
-fn batches(path: &Path) -> Result<impl Iterator<Item = Result<RecordBatch>>> {
+pub(super) fn batches(path: &Path) -> Result<impl Iterator<Item = Result<RecordBatch>>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
     Ok(reader.map(|batch| Ok(batch?)))
 }
 
-fn int32<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a PrimitiveArray<Int32Type>> {
+pub(super) fn int32<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<&'a PrimitiveArray<Int32Type>> {
     batch
         .column_by_name(name)
         .and_then(|c| c.as_primitive_opt::<Int32Type>())
         .with_context(|| format!("no Int32 column {name}"))
 }
 
-/// Call `f` for every version in a table as it stood at block `cut`:
-/// clamp files applied, later versions dropped, later closes undone.
-fn visit(
-    dir: &Path,
-    table: &DumpTable,
-    cut: i32,
-    shape: &mut Option<Shape>,
-    mut f: impl FnMut(Row) -> Result<()>,
-) -> Result<()> {
+/// Upper block bounds recorded by clamp files, by `vid`: versions closed
+/// after the chunk holding them was written.
+pub(super) fn clamps(dir: &Path, table: &DumpTable) -> Result<HashMap<i64, i32>> {
     let mut clamps = HashMap::new();
     for clamp in &table.clamps {
         check_relative(&clamp.file)?;
@@ -102,6 +99,19 @@ fn visit(
             }
         }
     }
+    Ok(clamps)
+}
+
+/// Call `f` for every version in a table as it stood at block `cut`:
+/// clamp files applied, later versions dropped, later closes undone.
+fn visit(
+    dir: &Path,
+    table: &DumpTable,
+    cut: i32,
+    shape: &mut Option<Shape>,
+    mut f: impl FnMut(Row) -> Result<()>,
+) -> Result<()> {
+    let clamps = clamps(dir, table)?;
 
     for chunk in &table.chunks {
         check_relative(&chunk.file)?;
@@ -413,7 +423,7 @@ pub fn diff(a: &Path, b: &Path, at: Option<i32>) -> Result<Diff> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::fs;
     use std::sync::Arc;
@@ -425,7 +435,7 @@ mod tests {
     use tempfile::TempDir;
 
     /// (vid, start, end, id, value)
-    type TokenRow = (i64, i32, Option<i32>, &'static str, i32);
+    pub(crate) type TokenRow = (i64, i32, Option<i32>, &'static str, i32);
 
     fn write(path: &Path, schema: Schema, columns: Vec<ArrayRef>) {
         let schema = Arc::new(schema);
@@ -435,7 +445,7 @@ mod tests {
         writer.close().unwrap();
     }
 
-    fn dump(head: i32, rows: &[TokenRow], clamps: &[(i64, i32)]) -> TempDir {
+    pub(crate) fn dump(head: i32, rows: &[TokenRow], clamps: &[(i64, i32)]) -> TempDir {
         let dir = TempDir::new().unwrap();
         fs::create_dir(dir.path().join("Token")).unwrap();
         write(
@@ -493,7 +503,7 @@ mod tests {
         diff.tables.into_iter().next().unwrap()
     }
 
-    const BASE: [TokenRow; 3] = [
+    pub(crate) const BASE: [TokenRow; 3] = [
         (1, 10, Some(50), "a", 1),
         (2, 50, None, "a", 2),
         (3, 20, None, "b", 7),

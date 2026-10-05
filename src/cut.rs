@@ -1,0 +1,307 @@
+use std::fs::{self, File};
+use std::path::Path;
+use std::sync::Arc;
+
+use anyhow::{Context, Result, bail};
+use arrow::array::{Array, ArrayRef, AsArray, BooleanArray, Int32Array, RecordBatch};
+use arrow::compute::filter_record_batch;
+use arrow::datatypes::Int64Type;
+use parquet::arrow::ArrowWriter;
+use parquet::basic::{Compression, ZstdLevel};
+use parquet::file::properties::WriterProperties;
+use serde_json::json;
+
+use super::diff::{batches, clamps, int32};
+use super::{BlockPtr, CATALOGUE_FILE, DumpTable, check_relative, read_metadata};
+
+const DATA_SOURCES_TABLE: &str = "data_sources$";
+const CHUNK: &str = "chunk_000000.parquet";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cut {
+    pub block: BlockPtr,
+    /// Versions written.
+    pub versions: usize,
+    /// Versions that began after the block, and were left out.
+    pub dropped: usize,
+    /// Versions closed after the block, written open.
+    pub reopened: usize,
+}
+
+#[derive(Default)]
+struct TableCut {
+    versions: usize,
+    dropped: usize,
+    reopened: usize,
+    open: usize,
+    min_vid: i64,
+    max_vid: i64,
+}
+
+fn cut_table(src: &Path, dst: &Path, name: &str, table: &DumpTable, cut: i32) -> Result<TableCut> {
+    let clamps = clamps(src, table)?;
+    let mut out = TableCut {
+        max_vid: -1,
+        ..Default::default()
+    };
+    let mut writer = None;
+
+    for chunk in &table.chunks {
+        check_relative(&chunk.file)?;
+        for batch in batches(&src.join(&chunk.file))? {
+            let batch = batch?;
+            let schema = batch.schema();
+            let vids = batch
+                .column_by_name("vid")
+                .and_then(|c| c.as_primitive_opt::<Int64Type>())
+                .with_context(|| format!("{} has no Int64 vid", chunk.file))?;
+            let starts = match schema.column_with_name("block$") {
+                Some(_) => int32(&batch, "block$")?,
+                None => int32(&batch, "block_range_start")?,
+            };
+            let keep: BooleanArray = starts.values().iter().map(|s| Some(*s <= cut)).collect();
+            out.dropped += keep.false_count();
+
+            let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
+            let end_column = schema.column_with_name("block_range_end").map(|(i, _)| i);
+            if let Some(index) = end_column {
+                let ends = int32(&batch, "block_range_end")?;
+                let cut_ends: Int32Array = (0..batch.num_rows())
+                    .map(|i| {
+                        let end = clamps
+                            .get(&vids.value(i))
+                            .copied()
+                            .or_else(|| ends.is_valid(i).then(|| ends.value(i)));
+                        if keep.value(i) && end.is_some_and(|end| end > cut) {
+                            out.reopened += 1;
+                        }
+                        end.filter(|end| *end <= cut)
+                    })
+                    .collect();
+                columns[index] = Arc::new(cut_ends);
+            }
+            let kept = filter_record_batch(&RecordBatch::try_new(schema.clone(), columns)?, &keep)?;
+            if kept.num_rows() == 0 {
+                continue;
+            }
+
+            let vids = kept
+                .column_by_name("vid")
+                .unwrap()
+                .as_primitive::<Int64Type>();
+            if out.versions == 0 {
+                out.min_vid = vids.value(0);
+            }
+            out.max_vid = vids.value(kept.num_rows() - 1);
+            out.versions += kept.num_rows();
+            out.open += match end_column {
+                Some(index) => kept.column(index).null_count(),
+                None => kept.num_rows(),
+            };
+
+            if writer.is_none() {
+                fs::create_dir_all(dst.join(name))?;
+                let properties = WriterProperties::builder()
+                    .set_compression(Compression::ZSTD(ZstdLevel::default()))
+                    .build();
+                let file = File::create(dst.join(name).join(CHUNK))?;
+                writer = Some(ArrowWriter::try_new(file, schema, Some(properties))?);
+            }
+            writer.as_mut().unwrap().write(&kept)?;
+        }
+    }
+    if let Some(writer) = writer {
+        writer.close()?;
+    }
+    Ok(out)
+}
+
+/// Write to `dst` the dump `src` would have been had it been taken at
+/// `block`: later versions dropped, later closes undone, clamp files
+/// folded in. `graphman restore` of the result is a deployment rewound to
+/// that block, without the source deployment being touched.
+///
+/// The caller vouches that `block.hash` is the block the source indexed at
+/// that height.
+pub fn cut(src: &Path, dst: &Path, block: BlockPtr) -> Result<Cut> {
+    let metadata = read_metadata(src)?;
+    let Some(head) = &metadata.head_block else {
+        bail!("dump has no head block");
+    };
+    if block.number > head.number {
+        bail!(
+            "block {} is beyond the dump head {}",
+            block.number,
+            head.number
+        );
+    }
+    if block.number < metadata.earliest_block_number {
+        bail!(
+            "block {} is before the dump's earliest block {}",
+            block.number,
+            metadata.earliest_block_number
+        );
+    }
+    if let Some(graft) = &metadata.graft_block
+        && block.number < graft.number
+    {
+        bail!(
+            "block {} is below the graft point {}",
+            block.number,
+            graft.number
+        );
+    }
+    if dst.exists() && fs::read_dir(dst)?.next().is_some() {
+        bail!("{} is not empty", dst.display());
+    }
+    fs::create_dir_all(dst)?;
+
+    let mut raw: serde_json::Value = serde_json::from_slice(&fs::read(src.join("metadata.json"))?)?;
+    let mut result = Cut {
+        block: BlockPtr {
+            number: block.number,
+            hash: block.hash.trim_start_matches("0x").to_ascii_lowercase(),
+        },
+        versions: 0,
+        dropped: 0,
+        reopened: 0,
+    };
+    let mut entity_count = 0;
+
+    for (name, table) in &metadata.tables {
+        let table_cut = cut_table(src, dst, name, table, block.number)
+            .with_context(|| format!("cutting {name}"))?;
+        result.versions += table_cut.versions;
+        result.dropped += table_cut.dropped;
+        result.reopened += table_cut.reopened;
+        // graph-node's count is of live entities, the POI's among them.
+        if name != DATA_SOURCES_TABLE {
+            entity_count += table_cut.open;
+        }
+
+        let entry = &mut raw["tables"][name];
+        entry["chunks"] = if table_cut.versions == 0 {
+            json!([])
+        } else {
+            json!([{
+                "file": format!("{name}/{CHUNK}"),
+                "min_vid": table_cut.min_vid,
+                "max_vid": table_cut.max_vid,
+                "row_count": table_cut.versions,
+            }])
+        };
+        entry["clamps"] = json!([]);
+        entry["max_vid"] = json!(table_cut.max_vid);
+    }
+
+    raw["head_block"] = json!({ "number": result.block.number, "hash": result.block.hash });
+    raw["entity_count"] = json!(entity_count);
+
+    for file in ["schema.graphql", "subgraph.yaml"] {
+        if src.join(file).exists() {
+            fs::copy(src.join(file), dst.join(file))?;
+        }
+    }
+    // Last, as graphman does: a directory without it is not yet a dump.
+    let tmp = dst.join("metadata.json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(&raw)?)?;
+    fs::rename(&tmp, dst.join("metadata.json"))?;
+    debug_assert!(!dst.join(CATALOGUE_FILE).exists());
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diff::tests::{BASE, TokenRow, dump};
+    use crate::{diff, state};
+    use tempfile::TempDir;
+
+    fn ptr(number: i32) -> BlockPtr {
+        BlockPtr {
+            number,
+            hash: "0xBEEF".into(),
+        }
+    }
+
+    /// BASE plus: "b" closed at 90 by a clamp file and replaced, "c" born at 70.
+    fn source() -> TempDir {
+        let mut rows: Vec<TokenRow> = BASE.to_vec();
+        rows.push((4, 70, None, "c", 3));
+        rows.push((5, 90, None, "b", 9));
+        dump(100, &rows, &[(3, 90)])
+    }
+
+    fn metadata(dir: &Path) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(dir.join("metadata.json")).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn cut_is_the_dump_as_it_stood_at_the_block() {
+        let src = source();
+        let dst = TempDir::new().unwrap();
+        let result = cut(src.path(), dst.path(), ptr(60)).unwrap();
+        assert_eq!(
+            (result.versions, result.dropped, result.reopened),
+            (3, 2, 1)
+        );
+
+        assert_eq!(
+            state(dst.path(), None).unwrap(),
+            state(src.path(), Some(60)).unwrap()
+        );
+        assert_eq!(diff(dst.path(), src.path(), None).unwrap().first(), None);
+
+        let metadata = metadata(dst.path());
+        assert_eq!(
+            metadata["head_block"],
+            json!({ "number": 60, "hash": "beef" })
+        );
+        // "a" and "b" are live at 60; the closed first version of "a" is not.
+        assert_eq!(metadata["entity_count"], 2);
+        let table = &metadata["tables"]["Token"];
+        assert_eq!(table["clamps"], json!([]));
+        assert_eq!(table["max_vid"], 3);
+        assert_eq!(
+            table["chunks"],
+            json!([{ "file": "Token/chunk_000000.parquet", "min_vid": 1, "max_vid": 3, "row_count": 3 }])
+        );
+    }
+
+    #[test]
+    fn cut_at_the_head_only_folds_the_clamps_in() {
+        let src = source();
+        let dst = TempDir::new().unwrap();
+        let result = cut(src.path(), dst.path(), ptr(100)).unwrap();
+        assert_eq!(
+            (result.versions, result.dropped, result.reopened),
+            (5, 0, 0)
+        );
+        assert_eq!(
+            state(dst.path(), None).unwrap(),
+            state(src.path(), None).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_table_cut_to_nothing_has_no_chunks() {
+        let src = source();
+        let dst = TempDir::new().unwrap();
+        cut(src.path(), dst.path(), ptr(5)).unwrap();
+        let metadata = metadata(dst.path());
+        assert_eq!(metadata["tables"]["Token"]["chunks"], json!([]));
+        assert_eq!(metadata["tables"]["Token"]["max_vid"], -1);
+        assert_eq!(metadata["entity_count"], 0);
+        assert!(!dst.path().join("Token").exists());
+    }
+
+    #[test]
+    fn cut_refuses_a_block_past_the_head_and_a_used_directory() {
+        let src = source();
+        let dst = TempDir::new().unwrap();
+        assert!(cut(src.path(), dst.path(), ptr(101)).is_err());
+        cut(src.path(), dst.path(), ptr(60)).unwrap();
+        let err = cut(src.path(), dst.path(), ptr(60)).unwrap_err();
+        assert!(err.to_string().contains("not empty"), "{err}");
+    }
+}

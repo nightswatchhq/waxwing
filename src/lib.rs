@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+mod cut;
 mod diff;
+pub use cut::{Cut, cut};
 pub use diff::{Diff, State, TableDiff, TableState, diff, state};
 
 pub const CATALOGUE_FILE: &str = "catalogue.json";

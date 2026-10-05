@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use waxwing::{Chain, RpcChain, SealOptions, diff, seal, state, verify};
+use waxwing::{
+    BlockPtr, Chain, RpcChain, SealOptions, cut, diff, read_catalogue, seal, state, verify,
+};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -44,6 +46,19 @@ enum Command {
         #[arg(long)]
         at: Option<i32>,
     },
+    /// Write the dump a deployment would have had at an earlier block;
+    /// restoring it is a rewind that never touches the source
+    Cut {
+        src: PathBuf,
+        /// Must be empty or absent
+        dst: PathBuf,
+        #[arg(long)]
+        at: i32,
+        /// Ethereum JSON-RPC endpoint to learn the block's hash from;
+        /// not needed when the block is one the source was sealed at
+        #[arg(long)]
+        rpc: Option<String>,
+    },
     /// Hash a dump's entity versions as of a block, independent of vid,
     /// row order and encoding: what two indexers should agree on
     State {
@@ -81,6 +96,34 @@ fn main() -> Result<ExitCode> {
                 bytes
             );
             println!("root {}", catalogue.root);
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Cut { src, dst, at, rpc } => {
+            let sealed = read_catalogue(&src).ok().and_then(|c| {
+                let mut heads = c.layers.into_iter().map(|l| l.head_block);
+                heads.find(|head| head.number == at)
+            });
+            let block = match (sealed, rpc) {
+                (Some(block), _) => block,
+                (None, Some(rpc)) => BlockPtr {
+                    number: at,
+                    hash: RpcChain::new(rpc)
+                        .block_hash(at)?
+                        .with_context(|| format!("the chain has no block {at}"))?,
+                },
+                (None, None) => bail!(
+                    "block {at} is not one the dump was sealed at: pass --rpc to learn its hash"
+                ),
+            };
+            let result = cut(&src, &dst, block)?;
+            println!(
+                "cut at block {} ({}): {} versions, {} dropped, {} reopened",
+                result.block.number,
+                result.block.hash,
+                result.versions,
+                result.dropped,
+                result.reopened
+            );
             Ok(ExitCode::SUCCESS)
         }
         Command::State { dir, at } => {

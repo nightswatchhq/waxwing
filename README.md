@@ -21,6 +21,7 @@ waxwing seal <dump-dir> [--rpc URL] [--graph-node-version V] [--public-poi 0x…
 waxwing verify <dump-dir> [--rpc URL]
 waxwing diff <dump-dir-a> <dump-dir-b> [--at BLOCK]
 waxwing state <dump-dir> [--at BLOCK]
+waxwing cut <src-dump-dir> <dst-dir> --at BLOCK [--rpc URL]
 ```
 
 `seal` reads the dump's `metadata.json`, hashes every file it references
@@ -142,16 +143,44 @@ block. This is the state commitment the POI is not, and what multi-party
 attestation would sign. `data_sources$.parent` is still untested: it was null
 in every row the rig produced.
 
+## Cut
+
+`waxwing cut` writes the dump a deployment would have had at an earlier
+block: versions that began later are dropped, closes that came later are
+undone, clamp files are folded in, and the head pointer and entity count are
+rewritten. Restoring the result is a rewind that never touches the source
+deployment, and a copy at a chosen block height (graph-node#6085). It mirrors
+what graph-node's own revert does to the tables, including leaving
+`done_at` on data sources alone.
+
+`rig/cut.sh` dumps A at block 94, cuts the dump back to block 59 (before the
+third child is spawned, so a dynamic data source is dropped), restores the
+cut into B and lets B index forward by itself. B re-derives everything: POIs
+and entities match A at five blocks either side of the cut, and a final
+`diff` of both nodes' dumps is identical at block 104. The cut's state root
+equals `state --at 59` of the uncut dump.
+
+The block hash written into the cut comes from a sealed layer when the block
+is one, and otherwise from `--rpc`; nothing yet checks that hash is the block
+the source actually indexed at that height.
+
+## Indexes
+
+Not solved, and not solvable from outside. `graphman restore` builds the
+default index set whatever the dump records (graph-node#6722 is the same
+complaint about copy). waxwing could drop the surplus afterwards, which
+recovers the disk but not the hours spent building them. The fix belongs in
+graph-node's restore: create only the indexes in the dump's metadata.
+
 ## Next
 
 [docs/graphman-issues.md](docs/graphman-issues.md) is a scan of what operators
-complain about in graphman. What it points at, less the diff now built:
+complain about in graphman. What remains of it:
 
-1. Restore with the catalogue's recorded indexes rather than the default set,
-   and restore to a chosen block at or below the head. The cut-at-block logic
-   is already in diff.
+1. Indexes on restore, as a graph-node patch.
 2. Finality: refuse to seal a head the chain has not finalised.
-3. Diff and state for large tables: sort and merge on disk, not in memory.
+3. Diff, state and cut for large tables: bounded memory, sort and merge on
+   disk. Cut already streams; diff and state do not.
 4. Record the state root in the catalogue at seal, and sign it.
 
 And the experiments still owed: nested data sources (for `parent`), real
