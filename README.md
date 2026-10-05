@@ -12,9 +12,9 @@ checked against the code, and what exists.
 
 ## Status
 
-One slice: `waxwing seal` and `waxwing verify`, which wrap a `graphman dump`
-directory in a hashed catalogue. Tested against a synthetic dump directory
-only. Nothing here has yet touched a real graph-node dump.
+`waxwing seal` and `waxwing verify` wrap a `graphman dump` directory in a
+hashed catalogue. `rig/run.sh` is the first kill experiment in miniature, and
+it passes; see below.
 
 ```
 waxwing seal <dump-dir> [--graph-node-version V] [--public-poi 0x…]
@@ -63,16 +63,40 @@ What the dump does not have, and waxwing therefore has to add:
 - No account of pruning between incremental runs, which deletes rows that
   earlier chunks still hold.
 
+## The rig
+
+`rig/run.sh` needs docker, foundry, graph-cli and about 4 GB for the VM (two
+graph-nodes will not fit in colima's default 2 GB; A is OOM-killed mid-sync).
+It runs two graph-node v0.45.0 installations with separate databases against
+one anvil chain, and:
+
+1. syncs a factory subgraph on A (dynamic data sources, two mutable entities,
+   one immutable), takes a full dump, then an incremental dump 31 blocks on;
+2. seals the directory with the public POI at the dump head, and verifies it;
+3. restores it into B, which has never been told about the subgraph, and lets
+   both index a further 31 blocks;
+4. compares public POIs and full entity sets between A and B at five blocks:
+   before and at each dump head, and at the final head.
+
+Result on 2026-10-05: all ten comparisons match. B answers time-travel queries
+below the restore point, so the clamp files were applied, and it indexes pings
+from children spawned before the restore, so `data_sources$` came across.
+
+What this does not show: anything about scale, pruned or grafted deployments,
+fulltext, file data sources, reorgs between dumps, or a real chain. It is one
+toy subgraph of 125 blocks. It also needed two things the dump docs do not
+mention: `graphman create <name>` on the receiver before `restore --name`,
+and the receiver must be able to fetch the manifest and WASM from IPFS, since
+the dump carries neither.
+
 ## Next
 
-The three kill experiments from the research note, in order. All need a
-graph-node with a synced deployment and a second installation to restore to.
-
-1. Dump at a final block, seal, restore elsewhere, index 10k blocks, compare
-   public POIs with the network. Choose deployments with factories, with
-   account-like tables, and with fulltext.
+1. The same experiment against real deployments with factories, account-like
+   tables and fulltext, and a real network to compare public POIs with. Needs
+   a graph-node at v0.42 or later holding synced deployments.
 2. Time restore and index build per TB against a sync.
 3. Dump the same final window twice a week apart and diff the rows.
+4. Extend the rig: a reorg between two incremental dumps (anvil can do it),
+   pruning between dumps, a grafted deployment.
 
-Then: fetch the public POI at the head block from the index-node and record
-it at seal time, rather than taking it on a flag.
+Then: have `seal` fetch the public POI from the index-node itself.

@@ -1,0 +1,15 @@
+[store]
+[store.primary]
+connection = "postgresql://graph-node:let-me-in@postgres-b:5432/graph-node"
+pool_size = 10
+
+[chains]
+ingestor = "default"
+[chains.test]
+shard = "primary"
+provider = [ { label = "anvil", url = "http://anvil:8545", features = ["archive"] } ]
+
+[deployment]
+[[deployment.rule]]
+shard = "primary"
+indexers = [ "default" ]

@@ -1,0 +1,48 @@
+name: waxwing-rig
+
+x-postgres: &postgres
+  image: postgres:16
+  command: ["postgres", "-cshared_preload_libraries=pg_stat_statements", "-cmax_connections=200"]
+  environment:
+    POSTGRES_USER: graph-node
+    POSTGRES_PASSWORD: let-me-in
+    POSTGRES_DB: graph-node
+    POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
+
+x-graph-node: &graph-node
+  image: graphprotocol/graph-node:v0.45.0
+  environment: &graph-node-env
+    ipfs: "ipfs:5001"
+    node_id: default
+    BLOCK_INGESTOR: default
+    GRAPH_LOG: info
+    ETHEREUM_POLLING_INTERVAL: 500
+
+services:
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:stable
+    entrypoint: ["anvil", "--host", "0.0.0.0"]
+    ports: ["18545:8545"]
+  ipfs:
+    image: ipfs/kubo:v0.39.0
+    ports: ["15001:5001"]
+  postgres-a: *postgres
+  postgres-b: *postgres
+  # The publisher.
+  graph-node-a:
+    <<: *graph-node
+    depends_on: [anvil, ipfs, postgres-a]
+    ports: ["18000:8000", "18020:8020", "18030:8030"]
+    environment:
+      <<: *graph-node-env
+      GRAPH_NODE_CONFIG: /config/a.toml
+    volumes: ["./config:/config:ro", "./work/dumps:/dumps"]
+  # The receiver. Never told about the subgraph except through restore.
+  graph-node-b:
+    <<: *graph-node
+    depends_on: [anvil, ipfs, postgres-b]
+    ports: ["28000:8000", "28030:8030"]
+    environment:
+      <<: *graph-node-env
+      GRAPH_NODE_CONFIG: /config/b.toml
+    volumes: ["./config:/config:ro", "./work/dumps:/dumps"]

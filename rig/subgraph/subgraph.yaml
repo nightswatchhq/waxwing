@@ -1,0 +1,42 @@
+specVersion: 1.2.0
+schema:
+  file: ./schema.graphql
+dataSources:
+  - kind: ethereum
+    name: Factory
+    network: test
+    source:
+      # anvil account 0, nonce 0
+      address: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+      abi: Factory
+      startBlock: 0
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities: [Stats, Child]
+      abis:
+        - name: Factory
+          file: ./abis/Factory.json
+      eventHandlers:
+        - event: Spawned(address)
+          handler: handleSpawned
+      file: ./src/mapping.ts
+templates:
+  - kind: ethereum
+    name: ChildTemplate
+    network: test
+    source:
+      abi: Child
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities: [Stats, Child, PingEvent]
+      abis:
+        - name: Child
+          file: ./abis/Child.json
+      eventHandlers:
+        - event: Ping(uint256)
+          handler: handlePing
+      file: ./src/mapping.ts

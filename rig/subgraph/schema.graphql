@@ -1,0 +1,18 @@
+type Stats @entity(immutable: false) {
+  id: ID!
+  spawned: Int!
+  pings: BigInt!
+}
+
+type Child @entity(immutable: false) {
+  id: Bytes!
+  pings: BigInt!
+  createdAt: BigInt!
+}
+
+type PingEvent @entity(immutable: true) {
+  id: Bytes!
+  child: Child!
+  n: BigInt!
+  block: BigInt!
+}

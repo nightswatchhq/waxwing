@@ -1,0 +1,7 @@
+work/
+contracts/out/
+contracts/cache/
+subgraph/node_modules/
+subgraph/generated/
+subgraph/build/
+subgraph/abis/
