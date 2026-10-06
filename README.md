@@ -74,6 +74,10 @@ Things to know:
   dump it never saw.
 - Already restored with graphman? `waxwing indexes <dump> --db … --apply`
   puts the dump's indexes back.
+- Sharded? Point `--db` at the shard the deployment goes to and
+  `--primary-db` at the primary, for both `restore` and `indexes`.
+- Tested with graph-node v0.42.1 to v0.45.0, across releases in both
+  directions; dump and restore do not exist before v0.42.0.
 - The receiver needs what the subgraph needs from graph-node: an ENS
   subgraph, for one, needs the ENS rainbow table loaded, or it fails on its
   first block after the restore.
@@ -189,6 +193,22 @@ Indexer agents batch: one transaction there carries 600 logs, 50 of them
 the subgraph's triggers, and graph-node v0.45 runs out of memory on a run
 of such transactions whether or not it batches writes. Not waxwing's to
 fix, but worth knowing before syncing anything agents touch.
+
+### Indexer setups
+
+`graphman dump` and `restore` arrived in graph-node v0.42.0. `rig/versions.sh`
+runs `fast-restore.sh` with each release on both nodes, and across them: on
+2026-10-06 every check passed for v0.42.1, v0.43.0, v0.44.0 and v0.45.0 on
+their own, for a v0.42.1 publisher handing to a v0.45.0 receiver, and for
+the reverse. Releases before postponed index creation have no flag for it,
+and waxwing sets it only where it exists.
+
+`rig/shard.sh` restores into a receiver with two shards, the deployment
+placed in the second by a deployment rule, graph-node's catalogue in the
+primary: `waxwing restore --shard shard1 --db <shard> --primary-db
+<primary>` lands it there, the index set matches the source's, `waxwing
+indexes --primary-db` finds it, and after B indexes on POIs, entities and
+every table agree.
 
 ### Real deployments
 
