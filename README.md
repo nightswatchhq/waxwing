@@ -6,15 +6,83 @@ enough evidence attached that the receiver can decide whether to trust it.
 Waxwings pass berries down the branch from bird to bird. That is the whole
 idea.
 
+Early, and looking for indexers to try it. It works against a stock
+graph-node (tested on v0.45.0) and needs nothing patched; everything below is
+tested on a local rig and on small real subgraphs, not yet on a production
+deployment. Issues and reports are very welcome.
+
+## What it does
+
+`graphman dump` and `graphman restore` can already move a deployment
+between indexers. waxwing makes that safe to rely on, and faster:
+
+- **Seal** a dump: every file hashed, every incremental layer recorded with
+  the block it was taken at, checked against the chain so a dump from a
+  reverted fork or pruned past its last layer is refused, and a state root
+  that two honest indexers can agree on whatever their `vid`s, row order or
+  Parquet bytes.
+- **Cut** a dump back to any earlier block, such as the chain's finalized
+  block, so what you hand over cannot be reverted.
+- **Restore** it with `waxwing restore`: graphman creates the deployment,
+  waxwing loads the rows with `COPY` and builds the dump's own indexes
+  afterwards. About 2.6 times faster than `graphman restore` in our
+  measurements, keeps the indexes the source had, resumes if interrupted,
+  handles fulltext columns, and restores a graft without its base.
+- **Attest** to a state root with your indexer or operator key, as a signed
+  file, on IPFS, or on the Ethereum Attestation Service; a receiver counts
+  the attestations of indexers with stake on the network.
+- **Diff** two dumps and get the first block at which they disagree.
+
+## Quickstart
+
+Install (Rust 1.88 or later):
+
+```
+cargo install --git https://github.com/nightswatchhq/waxwing
+```
+
+On the indexer handing the deployment over:
+
+```
+graphman --config graph-node.toml dump <deployment> /dumps/sub
+waxwing seal /dumps/sub --rpc <chain-rpc>                 # after every dump
+waxwing cut /dumps/sub /dumps/sub-final --at final --rpc <chain-rpc>
+waxwing seal /dumps/sub-final --rpc <chain-rpc>
+waxwing attest /dumps/sub-final --key-file operator.key --indexer <indexer-address>
+```
+
+Ship `/dumps/sub-final` however you like. On the receiving indexer:
+
+```
+waxwing verify /dumps/sub-final --rpc <chain-rpc> --require-final
+graphman --config graph-node.toml create <subgraph-name>
+waxwing restore /dumps/sub-final --db postgresql://user:pass@host/graph-node \
+  --config graph-node.toml --work /dumps/waxwing-work \
+  --name <subgraph-name> --node <index-node-id>
+waxwing attested /dumps/sub-final attestation.json --network-rpc <arbitrum-one-rpc>
+```
+
+Things to know:
+
+- `graphman dump` writes as graph-node's user, root in the official image
+  on Linux. Run `waxwing seal` as the dump's owner, or `chown` the dump.
+- `waxwing restore` runs graphman for you: pass `--graphman "docker exec -i
+  <container> graphman"` if it lives in a container, and `--work-as` for the
+  path at which graphman sees `--work`. It must reach the shard's Postgres
+  (`--db`, and `--primary-db` if the catalogue is elsewhere).
+- Seal after every incremental dump; waxwing refuses a directory holding a
+  dump it never saw.
+- Already restored with graphman? `waxwing indexes <dump> --db … --apply`
+  puts the dump's indexes back.
+
+## How it was checked, and the notes
+
 The background, the trust analysis and the three candidate designs are in
-[docs/research.md](docs/research.md). This README records what has since been
-checked against the code, and what exists.
+[docs/research.md](docs/research.md). The rest of this README is the record
+of what has since been checked against graph-node's code and on the rig
+(`rig/`), including what graphman gets wrong and how waxwing deals with it.
 
-## Status
-
-`waxwing seal` and `waxwing verify` wrap a `graphman dump` directory in a
-hashed catalogue. `rig/run.sh` is the first kill experiment in miniature, and
-it passes; see below.
+### Commands
 
 ```
 waxwing seal <dump-dir> [--rpc URL] [--no-state] [--graph-node-version V] [--public-poi 0x…]
@@ -38,8 +106,7 @@ missing, truncated, altered or unlisted file.
 
 The catalogue's `root` identifies one publisher's artefact. It is not a state
 commitment: two honest indexers will produce different Parquet bytes for the
-same deployment. Agreement between publishers needs a canonical row encoding,
-which is not built.
+same deployment. The state root is; see State root.
 
 ## What the graph-node code says
 
