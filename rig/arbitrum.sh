@@ -58,7 +58,7 @@ waxwing verify work/dumps/arb-cut --rpc $ARB --require-final
 echo "dumped at $H, cut to $MID"
 
 docker compose exec -T graph-node-b graphman --config /config/b-arbitrum.toml create $NAME >/dev/null
-waxwing restore work/dumps/arb-cut --db postgresql://graph-node:let-me-in@localhost:25432/graph-node \
+waxwing restore work/dumps/arb-cut --db $B_DB \
   --config config/b-arbitrum.toml --graphman "docker compose exec -T graph-node-b graphman" \
   --work work/dumps/waxwing --work-as /dumps/waxwing --name $NAME --node default | tail -1
 

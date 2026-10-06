@@ -31,7 +31,7 @@ echo "graft dumped at $F: base $(jq -r .graft_base $DUMP/metadata.json), block $
 
 docker compose exec -T graph-node-b graphman --config /config/b.toml create $NAME >/dev/null
 echo "graphman restore: $(docker compose exec -T graph-node-b graphman --config /config/b.toml restore /dumps/rig --name $NAME 2>&1 | tail -1)"
-waxwing restore $DUMP --db postgresql://graph-node:let-me-in@localhost:25432/graph-node \
+waxwing restore $DUMP --db $B_DB \
   --config config/b.toml --graphman "docker compose exec -T graph-node-b graphman" \
   --work work/dumps/waxwing --work-as /dumps/waxwing --name $NAME --node default | tail -1
 

@@ -24,7 +24,7 @@ echo "dump at block $F"
 
 restore
 echo "after graphman restore: $(diff <(indexes a) <(indexes b) | grep -c '^[<>]') index(es) differ"
-waxwing indexes $DUMP --db postgresql://graph-node:let-me-in@localhost:25432/graph-node --apply
+waxwing indexes $DUMP --db $B_DB --apply
 if diff <(indexes a) <(indexes b); then echo "ok        index set"; else
   echo "MISMATCH  index set (< A, > B)"; fail=1
 fi

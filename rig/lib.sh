@@ -1,5 +1,9 @@
 # Shared by the rig's experiments. Source it from the rig directory.
-RPC=http://localhost:18545
+# Host ports, overridable where another stack already holds them.
+export ANVIL_PORT=${ANVIL_PORT:-18545} IPFS_PORT=${IPFS_PORT:-15001} FORK_PORT=${FORK_PORT:-18546}
+RPC=http://localhost:$ANVIL_PORT
+IPFS=http://localhost:$IPFS_PORT
+B_DB=postgresql://graph-node:let-me-in@localhost:25432/graph-node
 KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 FACTORY=0x5FbDB2315678afecb367f032d93F642f64180aa3
 NAME=rig/test
@@ -65,6 +69,8 @@ entities() {
 dump() {
   local node=${1:-a} name=${2:-rig}
   docker compose exec -T graph-node-$node graphman --config /config/$node${CONFIG_SUFFIX:-}.toml dump "$DEPLOYMENT" /dumps/$name >/dev/null
+  # graphman writes as the container's user, root on Linux; seal writes beside it.
+  docker compose exec -T graph-node-$node chown -R "$(id -u):$(id -g)" /dumps/$name
   jq .head_block.number work/dumps/$name/metadata.json
 }
 
@@ -90,7 +96,7 @@ stack_up() {
 # deploy <admin url> <index url>: hand the subgraph to a node to index itself.
 deploy() {
   (cd ${SUBGRAPH:-subgraph} && graph create --node "$1" $NAME >/dev/null 2>&1 &&
-    graph deploy $NAME --node "$1" --ipfs http://localhost:15001 --version-label v1 >/dev/null 2>&1)
+    graph deploy $NAME --node "$1" --ipfs $IPFS --version-label v1 >/dev/null 2>&1)
   DEPLOYMENT=$(gql "$2/graphql" '{ indexingStatuses { subgraph } }' | jq -r '.data.indexingStatuses[0].subgraph')
 }
 

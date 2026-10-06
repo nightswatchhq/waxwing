@@ -26,10 +26,10 @@ services:
   anvil:
     image: ghcr.io/foundry-rs/foundry:stable
     entrypoint: ["anvil", "--host", "0.0.0.0"]
-    ports: ["18545:8545"]
+    ports: ["${ANVIL_PORT:-18545}:8545"]
   ipfs:
     image: ipfs/kubo:v0.39.0
-    ports: ["15001:5001"]
+    ports: ["${IPFS_PORT:-15001}:5001"]
   postgres-a:
     <<: *postgres
     ports: ["15432:5432"]

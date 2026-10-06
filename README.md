@@ -75,7 +75,8 @@ What the dump does not have, and waxwing therefore has to add:
 
 ## The rig
 
-`rig/run.sh` needs docker, foundry, graph-cli and about 4 GB for the VM (two
+`ANVIL_PORT`, `IPFS_PORT` and `FORK_PORT` move the rig's host ports where
+another stack holds them. `rig/run.sh` needs docker, foundry, graph-cli and about 4 GB for the VM (two
 graph-nodes will not fit in colima's default 2 GB; A is OOM-killed mid-sync).
 It runs two graph-node v0.45.0 installations with separate databases against
 one anvil chain, and:
@@ -126,6 +127,11 @@ and diverging POIs, although the POI at the dump head still matches. The
 script passes when `waxwing seal --rpc` refuses the directory.
 
 ## Layers
+
+`seal` writes `catalogue.json` into the dump directory, and `graphman dump`
+writes as graph-node's user, root in the official image on Linux: run
+`waxwing seal` as the dump's owner, or `chown` the directory after each
+dump. The rig does the latter.
 
 `seal` must run after every `graphman dump` into a directory. Each run becomes
 a layer recording the head it was dumped at, since graphman keeps only the

@@ -24,7 +24,7 @@ waxwing seal $DUMP --rpc $RPC >/dev/null
 echo "dumps at $F1 and $F2: $(find $DUMP -name 'clamp_*' | wc -l | tr -d ' ') clamp file(s)"
 
 docker compose exec -T graph-node-b graphman --config /config/b.toml create $NAME >/dev/null
-waxwing restore $DUMP --db postgresql://graph-node:let-me-in@localhost:25432/graph-node \
+waxwing restore $DUMP --db $B_DB \
   --config config/b.toml --graphman "docker compose exec -T graph-node-b graphman" \
   --work work/dumps/waxwing --work-as /dumps/waxwing --name $NAME --node default
 

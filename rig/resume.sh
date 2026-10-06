@@ -18,7 +18,7 @@ summary() {
                   (select block_number from subgraphs.head h join deployment_schemas s on s.id = h.id where s.name = '$nsp')"
 }
 restore_b() {
-  waxwing restore $DUMP --db postgresql://graph-node:let-me-in@localhost:25432/graph-node \
+  waxwing restore $DUMP --db $B_DB \
     --config config/b.toml --graphman "docker compose exec -T graph-node-b graphman" \
     --work work/dumps/waxwing --work-as /dumps/waxwing --name $NAME --node default
 }

@@ -51,10 +51,10 @@ fi
 # On the network, through IPFS: a fork of Arbitrum One on which a real
 # indexer with stake has made B's key its operator. B signs for it and
 # publishes; A's dump is checked against the CID with the fork as referee.
-FORK=http://localhost:18546
+FORK=http://localhost:$FORK_PORT
 INDEXER=0xfeff9093f6b32d0e5cddba743b06a1fedb87c004
 OPERATOR=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
-anvil --fork-url "${ARBITRUM_RPC:-https://arb1.arbitrum.io/rpc}" --port 18546 >/dev/null 2>&1 &
+anvil --fork-url "${ARBITRUM_RPC:-https://arb1.arbitrum.io/rpc}" --port $FORK_PORT >/dev/null 2>&1 &
 fork=$!
 trap 'kill $fork 2>/dev/null' EXIT
 until cast block-number --rpc-url $FORK >/dev/null 2>&1; do sleep 0.5; done
@@ -64,10 +64,10 @@ cast send --rpc-url $FORK --unlocked --from $INDEXER 0x00669A4CF01450B64E8A2A20E
   "setOperator(address,address,bool)" 0xb2Bb92d0DE618878E438b55D5846cfecD9301105 $OPERATOR true >/dev/null
 
 waxwing attest work/dumps/rig-b --key-file work/key-b --indexer $INDEXER \
-  --publish http://localhost:15001 > work/attestation-op.json 2> work/publish.log
+  --publish $IPFS > work/attestation-op.json 2> work/publish.log
 CID=$(awk '/^published/ {print $2}' work/publish.log)
 echo "attestation for $INDEXER, signed by its operator, at $CID"
-waxwing attested work/dumps/rig-a "$CID" --ipfs http://localhost:15001 --network-rpc $FORK || fail=1
+waxwing attested work/dumps/rig-a "$CID" --ipfs $IPFS --network-rpc $FORK || fail=1
 # And on the Ethereum Attestation Service, found by deployment alone: the
 # schema registered once, B's key publishing as the indexer's operator.
 cast send --rpc-url $FORK --private-key $KEY 0xA310da9c5B885E7fb3fbA9D66E9Ba6Df512b78eB \

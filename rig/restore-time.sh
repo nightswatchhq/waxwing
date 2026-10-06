@@ -39,7 +39,7 @@ wait_http $B_INDEX
 docker compose exec -T graph-node-b graphman --config /config/b.toml create $NAME >/dev/null
 rm -rf work/dumps/waxwing
 start=$SECONDS
-waxwing restore $DUMP --db postgresql://graph-node:let-me-in@localhost:25432/graph-node \
+waxwing restore $DUMP --db $B_DB \
   --config config/b.toml --graphman "docker compose exec -T graph-node-b graphman" \
   --work work/dumps/waxwing --work-as /dumps/waxwing --name $NAME --node default >/dev/null
 echo "waxwing restore on stock v0.45.0: took $((SECONDS - start))s"

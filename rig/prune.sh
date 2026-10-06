@@ -39,7 +39,7 @@ waxwing diff $DUMP work/dumps/rig-fresh | tail -1
 waxwing diff $DUMP work/dumps/rig-fresh >/dev/null || fail=1
 
 docker compose exec -T graph-node-b graphman --config /config/b.toml create $NAME >/dev/null
-waxwing restore $DUMP --db postgresql://graph-node:let-me-in@localhost:25432/graph-node \
+waxwing restore $DUMP --db $B_DB \
   --config config/b.toml --graphman "docker compose exec -T graph-node-b graphman" \
   --work work/dumps/waxwing --work-as /dumps/waxwing --name $NAME --node default | tail -1
 check "rows after restore (child stats ping_event)" "$(rows a)" "$(rows b)"
