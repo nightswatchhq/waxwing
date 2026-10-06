@@ -1,0 +1,6 @@
+# Real deployments from The Graph network, chosen on 2026-10-06 for coverage
+# of what subgraphs use, and run over a recent finalized window.
+# hash                                            network       features
+QmatH4cd25ymsfCFpgKPRQQ7uCYNgarxanVQ9WCfg4Y7TZ  arbitrum-one  templates, file data sources, fulltext, enums, BigDecimal, interfaces, immutables, declared eth_calls
+QmdP7cQxUnaDyN8ixK9XqbXBuhL9WrkyHinLq2DC9tPsiM  arbitrum-one  aggregations, timeseries, Int8 ids
+QmcPbHmaLmKEZLqy4gLXmAhJUuQnUY3Gq5HLkf4dp8KAhr  arbitrum-one  block handlers

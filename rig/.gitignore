@@ -8,3 +8,4 @@ subgraph/abis/
 feed/generated/
 feed/build/
 feed/node_modules/
+config/*-corpus.toml
