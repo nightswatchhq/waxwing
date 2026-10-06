@@ -41,18 +41,74 @@ fn index_name(sql: &str) -> Result<&str> {
 
 /// A dumped statement as one to run against namespace `nsp`. graph-node
 /// writes `sgd` in place of the source's namespace.
-fn in_namespace(sql: &str, nsp: &str) -> Result<String> {
+fn in_namespace(sql: &str, nsp: &str, concurrently: bool, multi_ops: bool) -> Result<String> {
     let Some((head, tail)) = sql.split_once(" on sgd.") else {
         bail!("`{sql}` is not on namespace sgd");
     };
-    let head = head.replacen("index ", "index concurrently ", 1);
+    let head = match concurrently {
+        true => head.replacen("index ", "index concurrently ", 1),
+        false => head.to_string(),
+    };
+    let tail = match multi_ops {
+        true => with_multi_ops(tail),
+        false => tail.to_string(),
+    };
     Ok(format!("{head} on \"{nsp}\".{tail}"))
+}
+
+/// A dump records BRIN indexes without operator classes. graph-node gives
+/// their block and vid columns the `minmax_multi_ops` ones wherever the
+/// server has them, and so does waxwing.
+fn with_multi_ops(tail: &str) -> String {
+    let Some((table, columns)) = tail.split_once(" using brin (") else {
+        return tail.to_string();
+    };
+    let mut depth = 0;
+    let mut end = columns.len();
+    for (i, c) in columns.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 0 => {
+                end = i;
+                break;
+            }
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    let (list, rest) = columns.split_at(end);
+    let mut out = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, c) in list.char_indices().chain([(list.len(), ',')]) {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                let column = list[start..i].trim();
+                out.push(match column {
+                    "lower(block_range)"
+                    | "coalesce(upper(block_range), 2147483647)"
+                    | "block$" => {
+                        format!("{column} int4_minmax_multi_ops")
+                    }
+                    "vid" => format!("{column} int8_minmax_multi_ops"),
+                    _ => column.to_string(),
+                });
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    format!("{table} using brin ({}{rest}", out.join(", "))
 }
 
 fn plan(
     nsp: &str,
     dumped: &BTreeMap<String, Vec<String>>,
     live: &[LiveIndex],
+    concurrently: bool,
+    multi_ops: bool,
 ) -> Result<IndexPlan> {
     let have: BTreeSet<&str> = live.iter().map(|i| i.name.as_str()).collect();
     let mut wanted = BTreeSet::new();
@@ -61,7 +117,7 @@ fn plan(
         let name = index_name(sql)?;
         wanted.insert(name);
         if !have.contains(name) {
-            create.push(in_namespace(sql, nsp)?);
+            create.push(in_namespace(sql, nsp, concurrently, multi_ops)?);
         }
     }
     // Only tables the dump lists indexes for: it has none for data_sources$.
@@ -69,7 +125,10 @@ fn plan(
         .iter()
         .filter(|i| dumped.contains_key(&i.table))
         .filter(|i| !i.constraint && !wanted.contains(i.name.as_str()))
-        .map(|i| format!("drop index concurrently if exists \"{nsp}\".\"{}\"", i.name))
+        .map(|i| match concurrently {
+            true => format!("drop index concurrently if exists \"{nsp}\".\"{}\"", i.name),
+            false => format!("drop index if exists \"{nsp}\".\"{}\"", i.name),
+        })
         .collect();
     Ok(IndexPlan {
         namespace: nsp.to_string(),
@@ -107,6 +166,16 @@ pub fn index_plan(dir: &Path, db: &mut Client, namespace: Option<&str>) -> Resul
         ),
     };
 
+    plan_in(db, &nsp, &metadata.indexes, true)
+}
+
+/// Plan the dumped `indexes` against what namespace `nsp` has now.
+pub(crate) fn plan_in(
+    db: &mut Client,
+    nsp: &str,
+    indexes: &BTreeMap<String, Vec<String>>,
+    concurrently: bool,
+) -> Result<IndexPlan> {
     let live: Vec<LiveIndex> = db
         .query(
             "select t.relname::text, i.relname::text,
@@ -125,7 +194,13 @@ pub fn index_plan(dir: &Path, db: &mut Client, namespace: Option<&str>) -> Resul
             constraint: row.get(2),
         })
         .collect();
-    plan(&nsp, &metadata.indexes, &live)
+    let multi_ops: bool = db
+        .query_one(
+            "select exists (select 1 from pg_opclass where opcname = 'int4_minmax_multi_ops')",
+            &[],
+        )?
+        .get(0);
+    plan(nsp, indexes, &live, concurrently, multi_ops)
 }
 
 /// Build the missing indexes, then drop the surplus, without locking out a
@@ -181,7 +256,7 @@ mod tests {
             live("poi2$", "attr_3_0_poi2$_digest", false),
             live("data_sources$", "gist_block_range_data_sources$", false),
         ];
-        let plan = plan("sgd7", &dumped, &live).unwrap();
+        let plan = plan("sgd7", &dumped, &live, true, true).unwrap();
         assert_eq!(
             plan.create,
             [
@@ -195,12 +270,31 @@ mod tests {
     }
 
     #[test]
+    fn brin_indexes_get_the_multi_ops_classes() {
+        let sql = r#"create index if not exists brin_stats on sgd.stats using brin (lower(block_range), coalesce(upper(block_range), 2147483647), vid)"#;
+        assert_eq!(
+            in_namespace(sql, "sgd1", false, true).unwrap(),
+            r#"create index if not exists brin_stats on "sgd1".stats using brin (lower(block_range) int4_minmax_multi_ops, coalesce(upper(block_range), 2147483647) int4_minmax_multi_ops, vid int8_minmax_multi_ops)"#
+        );
+        assert_eq!(
+            in_namespace(sql, "sgd1", false, false).unwrap(),
+            sql.replace(" on sgd.", r#" on "sgd1"."#)
+        );
+        let sql = r#"create index if not exists brin_ping on sgd.ping using brin (block$, vid)"#;
+        assert!(
+            in_namespace(sql, "sgd1", false, true)
+                .unwrap()
+                .ends_with("brin (block$ int4_minmax_multi_ops, vid int8_minmax_multi_ops)")
+        );
+    }
+
+    #[test]
     fn unique_and_quoted_names_are_read() {
         let sql =
             r#"create unique index if not exists "poi2$_pkey" on sgd."poi2$" using btree (vid)"#;
         assert_eq!(index_name(sql).unwrap(), "poi2$_pkey");
         assert_eq!(
-            in_namespace(sql, "sgd3").unwrap(),
+            in_namespace(sql, "sgd3", true, true).unwrap(),
             r#"create unique index concurrently if not exists "poi2$_pkey" on "sgd3"."poi2$" using btree (vid)"#
         );
     }

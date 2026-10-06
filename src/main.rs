@@ -4,8 +4,8 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use waxwing::{
-    Attestation, Chain, CutAt, RpcChain, SealOptions, apply_indexes, attest, cut, cut_block, diff,
-    index_plan, is_final, read_catalogue, seal, state, tally, verify,
+    Attestation, Chain, CutAt, RestoreOptions, RpcChain, SealOptions, apply_indexes, attest, cut,
+    cut_block, diff, index_plan, is_final, read_catalogue, restore, seal, state, tally, verify,
 };
 
 #[derive(Parser)]
@@ -111,6 +111,38 @@ enum Command {
         /// postponed ones back
         #[arg(long)]
         apply: bool,
+    },
+    /// Restore a dump with its own indexes, built after the rows are loaded.
+    /// graphman creates the deployment, parked on a node that does not
+    /// exist; waxwing loads it and hands it to --node
+    Restore {
+        dir: PathBuf,
+        /// The shard database to restore into, as postgresql://user:password@host/db
+        #[arg(long)]
+        db: String,
+        /// The primary database, if not the same as --db
+        #[arg(long)]
+        primary_db: Option<String>,
+        /// Your graphman config
+        #[arg(long)]
+        config: PathBuf,
+        /// How to run graphman, e.g. "docker exec -i graph-node graphman"
+        #[arg(long, default_value = "graphman")]
+        graphman: String,
+        /// An empty directory for waxwing's skeleton dump and graphman config
+        #[arg(long)]
+        work: PathBuf,
+        /// Where graphman sees --work, if not at the same path
+        #[arg(long)]
+        work_as: Option<String>,
+        /// The subgraph name, already created with `graphman create`
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "primary")]
+        shard: String,
+        /// The node to index the deployment once restored
+        #[arg(long)]
+        node: String,
     },
     /// Hash a dump's entity versions as of a block, independent of vid,
     /// row order and encoding: what two indexers should agree on
@@ -302,6 +334,36 @@ fn main() -> Result<ExitCode> {
             }
             apply_indexes(&plan, &mut db, |sql| println!("{sql};"))?;
             println!("done");
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Restore {
+            dir,
+            db,
+            primary_db,
+            config,
+            graphman,
+            work,
+            work_as,
+            name,
+            shard,
+            node,
+        } => {
+            let options = RestoreOptions {
+                db,
+                primary_db,
+                graphman: graphman.split_whitespace().map(String::from).collect(),
+                config,
+                work,
+                work_as,
+                name,
+                shard,
+                node,
+            };
+            let start = std::time::Instant::now();
+            restore(&dir, &options, |step| {
+                println!("{:>6.1}s {step}", start.elapsed().as_secs_f64())
+            })?;
+            println!("restored in {:.1}s", start.elapsed().as_secs_f64());
             Ok(ExitCode::SUCCESS)
         }
         Command::Diff { a, b, at } => {

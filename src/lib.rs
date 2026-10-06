@@ -13,9 +13,11 @@ mod cut;
 pub use attest::{Attestation, attest, statement, tally};
 mod diff;
 mod indexes;
+mod restore;
 pub use cut::{Cut, CutAt, cut, cut_block, dump_head};
 pub use diff::{Diff, State, TableDiff, TableState, diff, state};
 pub use indexes::{IndexPlan, apply as apply_indexes, index_plan};
+pub use restore::{PARKED_NODE, RestoreOptions, restore};
 mod sort;
 
 pub const CATALOGUE_FILE: &str = "catalogue.json";
