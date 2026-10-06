@@ -10,7 +10,7 @@ x-postgres: &postgres
     POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
 
 x-graph-node: &graph-node
-  image: graphprotocol/graph-node:v0.45.0
+  image: ${GRAPH_NODE_IMAGE:-graphprotocol/graph-node:v0.45.0}
   environment: &graph-node-env
     ipfs: "ipfs:5001"
     node_id: default

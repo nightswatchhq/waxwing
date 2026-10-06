@@ -220,18 +220,32 @@ finalized block (40): the head dump fails `--require-final`, the cut passes.
 
 ## Indexes
 
-Not solved, and not solvable from outside. `graphman restore` builds the
-default index set whatever the dump records (graph-node#6722 is the same
-complaint about copy). waxwing could drop the surplus afterwards, which
-recovers the disk but not the hours spent building them. The fix belongs in
-graph-node's restore: create only the indexes in the dump's metadata.
+`graphman restore` builds the default index set before importing a row,
+and ignores the `indexes` the dump records. A deployment whose operator
+dropped or added indexes comes back with the defaults, and every row of the
+import pays for maintaining them (graph-node#6722 is the same complaint
+about copy). This is not fixable from outside, so it is a graph-node patch:
+branch `pete/restore-dump-indexes` in graph-node, against `6838f4e3c`.
+Restore creates the tables bare, imports, then builds the dump's own
+indexes, and marks postponed indexes done so they are not added back later.
+The exclusion constraint or index is still created as the layout defines it.
+The dump's index SQL did not parse back as written (`if not exists`, and
+namespace `sgd`), so `CreateIndex::parse` now accepts both.
+
+`rig/indexes.sh` drops an attribute index on A, adds one by hand, dumps and
+restores into B, and compares the index sets. Stock v0.45.0 fails it: B
+gets the dropped index back and lacks the manual one. The patched build
+(`GRAPH_NODE_IMAGE=waxwing/graph-node:restore-indexes`, built from that
+branch with `docker/Dockerfile`) passes, and so do the other four rig
+scripts on it. The time saved on a large restore is not measured.
 
 ## Next
 
 [docs/graphman-issues.md](docs/graphman-issues.md) is a scan of what operators
 complain about in graphman. What remains of it:
 
-1. Indexes on restore, as a graph-node patch.
+1. Indexes on restore: measure the restore time saved on a large
+   deployment, then propose the patch upstream.
 2. Attestations: check a signer is an indexer or its operator on the
    network, and somewhere to publish and find them.
 
