@@ -21,6 +21,9 @@ pub struct Attestation {
     pub version: u32,
     pub deployment: String,
     pub block: BlockPtr,
+    /// The state covers history from this block; see `state`.
+    #[serde(default)]
+    pub from: i32,
     pub state_root: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexer: Option<String>,
@@ -38,15 +41,19 @@ pub fn statement(
     version: u32,
     deployment: &str,
     block: &BlockPtr,
+    from: i32,
     state_root: &str,
     indexer: Option<&str>,
 ) -> String {
     let mut out = format!(
-        "waxwing attestation v{version}\ndeployment: {deployment}\nblock: {} {}\nstate: {}",
+        "waxwing attestation v{version}\ndeployment: {deployment}\nblock: {} {}",
         block.number,
         hex0x(&block.hash),
-        hex0x(state_root)
     );
+    if version >= 2 {
+        out.push_str(&format!("\nfrom: {from}"));
+    }
+    out.push_str(&format!("\nstate: {}", hex0x(state_root)));
     if let Some(indexer) = indexer {
         out.push_str(&format!("\nindexer: {}", hex0x(indexer)));
     }
@@ -72,6 +79,7 @@ pub fn attest(
     key: &str,
     deployment: &str,
     block: &BlockPtr,
+    from: i32,
     state_root: &str,
     indexer: Option<&str>,
 ) -> Result<Attestation> {
@@ -83,6 +91,7 @@ pub fn attest(
         ATTESTATION_VERSION,
         deployment,
         block,
+        from,
         state_root,
         Some(&indexer),
     );
@@ -96,6 +105,7 @@ pub fn attest(
             number: block.number,
             hash: hex0x(&block.hash),
         },
+        from,
         state_root: hex0x(state_root),
         indexer: Some(indexer),
         signer,
@@ -115,6 +125,7 @@ impl Attestation {
             self.version,
             &self.deployment,
             &self.block,
+            self.from,
             &self.state_root,
             indexer,
         ))
@@ -142,6 +153,7 @@ impl Attestation {
         self.deployment == other.deployment
             && self.block.number == other.block.number
             && hex0x(&self.block.hash) == hex0x(&other.block.hash)
+            && self.from == other.from
             && hex0x(&self.state_root) == hex0x(&other.state_root)
     }
 }
@@ -223,7 +235,7 @@ mod tests {
     }
 
     fn signed(key: &str, root: &str) -> Attestation {
-        attest(key, "QmTest", &block(), root, None).unwrap()
+        attest(key, "QmTest", &block(), 0, root, None).unwrap()
     }
 
     fn signers(agreements: &[Agreement]) -> Vec<&str> {
@@ -262,11 +274,12 @@ mod tests {
             hash: "0x20ca45".into(),
         };
         assert_eq!(
-            statement(2, "QmTest", &block(), "0xAB", Some(ADDRESS_0)),
+            statement(2, "QmTest", &block(), 0, "0xAB", Some(ADDRESS_0)),
             statement(
                 2,
                 "QmTest",
                 &other,
+                0,
                 "ab",
                 Some(&ADDRESS_0.to_uppercase().replace("0X", "0x"))
             )
@@ -277,7 +290,7 @@ mod tests {
     fn a_version_1_attestation_still_verifies() {
         // As version 1 signed it: no indexer line.
         let key = SigningKey::from_slice(&hex::decode(KEY_1).unwrap()).unwrap();
-        let text = statement(1, "QmTest", &block(), "ab", None);
+        let text = statement(1, "QmTest", &block(), 0, "ab", None);
         let (signature, recovery) = key.sign_prehash_recoverable(&digest(&text));
         let mut bytes = signature.to_bytes().to_vec();
         bytes.push(27 + recovery.to_byte());
@@ -285,6 +298,7 @@ mod tests {
             version: 1,
             deployment: "QmTest".into(),
             block: block(),
+            from: 0,
             state_root: "0xab".into(),
             indexer: None,
             signer: ADDRESS_1.into(),
@@ -353,8 +367,8 @@ mod tests {
             HashMap::from([(ADDRESS_0, 100)]),
             HashSet::from([(ADDRESS_0, ADDRESS_1)]),
         );
-        let by_operator = attest(KEY_1, "QmTest", &block(), "ab", Some(ADDRESS_0)).unwrap();
-        let by_stranger = attest(KEY_2, "QmTest", &block(), "ab", Some(ADDRESS_0)).unwrap();
+        let by_operator = attest(KEY_1, "QmTest", &block(), 0, "ab", Some(ADDRESS_0)).unwrap();
+        let by_stranger = attest(KEY_2, "QmTest", &block(), 0, "ab", Some(ADDRESS_0)).unwrap();
         let unstaked = signed(KEY_2, "ab");
 
         let counted = tally(

@@ -108,7 +108,16 @@ struct TableCut {
     max_vid: i64,
 }
 
-fn cut_table(src: &Path, dst: &Path, name: &str, table: &DumpTable, cut: i32) -> Result<TableCut> {
+/// `earliest` is the dump's earliest block: versions closed at or before it
+/// are ones graph-node has pruned since an earlier chunk was written.
+fn cut_table(
+    src: &Path,
+    dst: &Path,
+    name: &str,
+    table: &DumpTable,
+    cut: i32,
+    earliest: i32,
+) -> Result<TableCut> {
     let mut clamps = Clamps::open(src, table)?;
     let mut order = VidOrder::default();
     let mut out = TableCut {
@@ -132,17 +141,24 @@ fn cut_table(src: &Path, dst: &Path, name: &str, table: &DumpTable, cut: i32) ->
                 Some(_) => int32(&batch, "block$")?,
                 None => int32(&batch, "block_range_start")?,
             };
-            let keep: BooleanArray = starts.values().iter().map(|s| Some(*s <= cut)).collect();
+            let end_column = schema.column_with_name("block_range_end").map(|(i, _)| i);
+            let ends = match end_column {
+                Some(_) => Some(int32(&batch, "block_range_end")?),
+                None => None,
+            };
+            let end = |i: usize| {
+                batch_clamps[i].or_else(|| ends.and_then(|e| e.is_valid(i).then(|| e.value(i))))
+            };
+            let keep: BooleanArray = (0..batch.num_rows())
+                .map(|i| Some(starts.value(i) <= cut && !end(i).is_some_and(|e| e <= earliest)))
+                .collect();
             out.dropped += keep.false_count();
 
             let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
-            let end_column = schema.column_with_name("block_range_end").map(|(i, _)| i);
             if let Some(index) = end_column {
-                let ends = int32(&batch, "block_range_end")?;
                 let cut_ends: Int32Array = (0..batch.num_rows())
                     .map(|i| {
-                        let end =
-                            batch_clamps[i].or_else(|| ends.is_valid(i).then(|| ends.value(i)));
+                        let end = end(i);
                         if keep.value(i) && end.is_some_and(|end| end > cut) {
                             out.reopened += 1;
                         }
@@ -240,8 +256,15 @@ pub fn cut(src: &Path, dst: &Path, block: BlockPtr) -> Result<Cut> {
     let mut entity_count = 0;
 
     for (name, table) in &metadata.tables {
-        let table_cut = cut_table(src, dst, name, table, block.number)
-            .with_context(|| format!("cutting {name}"))?;
+        let table_cut = cut_table(
+            src,
+            dst,
+            name,
+            table,
+            block.number,
+            metadata.earliest_block_number,
+        )
+        .with_context(|| format!("cutting {name}"))?;
         result.versions += table_cut.versions;
         result.dropped += table_cut.dropped;
         result.reopened += table_cut.reopened;
@@ -320,8 +343,8 @@ mod tests {
         );
 
         assert_eq!(
-            state(dst.path(), None).unwrap(),
-            state(src.path(), Some(60)).unwrap()
+            state(dst.path(), None, None).unwrap(),
+            state(src.path(), None, Some(60)).unwrap()
         );
         assert_eq!(diff(dst.path(), src.path(), None).unwrap().first(), None);
 
@@ -399,7 +422,7 @@ mod tests {
         let mut catalogue = seal(src.path(), options).unwrap();
         assert_eq!(
             catalogue.state_root,
-            Some(state(src.path(), None).unwrap().root)
+            Some(state(src.path(), None, None).unwrap().root)
         );
         assert_eq!(crate::verify(src.path(), None).unwrap().1, []);
 
@@ -422,8 +445,21 @@ mod tests {
             (5, 0, 0)
         );
         assert_eq!(
-            state(dst.path(), None).unwrap(),
-            state(src.path(), None).unwrap()
+            state(dst.path(), None, None).unwrap(),
+            state(src.path(), None, None).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_cut_leaves_out_history_pruned_since_an_earlier_chunk() {
+        let src = dump(100, &BASE, &[]);
+        crate::diff::tests::pruned_to(&src, 60);
+        let dst = TempDir::new().unwrap();
+        let result = cut(src.path(), dst.path(), ptr(80)).unwrap();
+        assert_eq!((result.versions, result.dropped), (2, 1));
+        assert_eq!(
+            state(dst.path(), None, None).unwrap(),
+            state(src.path(), None, Some(80)).unwrap()
         );
     }
 

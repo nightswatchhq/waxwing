@@ -46,6 +46,8 @@ pub struct TableDiff {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diff {
     pub deployment: String,
+    /// History before this block, which a pruned dump lacks, is ignored.
+    pub from: i32,
     /// Both dumps are compared as they stood at this block.
     pub block: i32,
     pub tables: Vec<TableDiff>,
@@ -176,12 +178,15 @@ impl Clamps {
     }
 }
 
-/// Call `f` for every version in a table as it stood at block `cut`:
-/// clamp files applied, later versions dropped, later closes undone.
+/// Call `f` for every version in a table as it stood at block `cut`, from
+/// block `from` on: clamp files applied, later versions dropped, later
+/// closes undone, and versions closed at or before `from` left out, as
+/// graph-node's pruning to `from` deletes them.
 fn visit(
     dir: &Path,
     table: &DumpTable,
     cut: i32,
+    from: i32,
     shape: &mut Option<Shape>,
     mut f: impl FnMut(Row) -> Result<()>,
 ) -> Result<()> {
@@ -231,12 +236,12 @@ fn visit(
                 order.check(vid, &chunk.file)?;
                 let clamp = clamps.end(vid)?;
                 let start = starts.value(index);
-                if start > cut {
+                let end =
+                    clamp.or_else(|| ends.and_then(|e| e.is_valid(index).then(|| e.value(index))));
+                if start > cut || end.is_some_and(|end| end <= from) {
                     continue;
                 }
-                let end = clamp
-                    .or_else(|| ends.and_then(|e| e.is_valid(index).then(|| e.value(index))))
-                    .filter(|end| *end <= cut);
+                let end = end.filter(|end| *end <= cut);
                 f(Row {
                     key: Sha256::digest(rows.row(index).as_ref()).into(),
                     start,
@@ -278,11 +283,14 @@ fn load(
     dir: &Path,
     table: &DumpTable,
     cut: i32,
+    from: i32,
     shape: &mut Option<Shape>,
     memory: usize,
 ) -> Result<impl Iterator<Item = Result<Version>> + use<>> {
     let mut sorter = Sorter::<RECORD>::new(memory);
-    visit(dir, table, cut, shape, |row| sorter.push(record(&row)))?;
+    visit(dir, table, cut, from, shape, |row| {
+        sorter.push(record(&row))
+    })?;
     let mut records = sorter.finish()?.peekable();
 
     Ok(std::iter::from_fn(move || {
@@ -336,13 +344,14 @@ fn samples(
     dir: &Path,
     table: &DumpTable,
     cut: i32,
+    from: i32,
     keys: &HashSet<Key>,
 ) -> Result<Vec<String>> {
     let mut out = Vec::new();
     if keys.is_empty() {
         return Ok(out);
     }
-    visit(dir, table, cut, &mut None, |row| {
+    visit(dir, table, cut, from, &mut None, |row| {
         if keys.contains(&row.key) && out.len() < SAMPLES {
             out.push(format!("{side} {}", describe(&row)?));
         }
@@ -358,23 +367,26 @@ pub struct TableState {
     pub root: String,
 }
 
-/// A commitment to a deployment's entity versions as of one block. Unlike
-/// the catalogue root it does not depend on `vid`, row order or Parquet
-/// encoding, so independent indexers can be expected to agree on it.
+/// A commitment to a deployment's entity versions from block `from` to
+/// block `block`. Unlike the catalogue root it does not depend on `vid`,
+/// row order or Parquet encoding, nor on history kept from before `from`,
+/// so independent indexers, pruned or not, can be expected to agree on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     pub deployment: String,
+    pub from: i32,
     pub block: i32,
     pub tables: Vec<TableState>,
     pub root: String,
 }
 
-/// Hash a dump's entity versions as they stood at `at` (default: its head).
-pub fn state(dir: &Path, at: Option<i32>) -> Result<State> {
-    state_in(dir, at, sort::MEMORY)
+/// Hash a dump's entity versions as they stood at `at` (default: its
+/// head), from block `from` (default: its earliest block) on.
+pub fn state(dir: &Path, from: Option<i32>, at: Option<i32>) -> Result<State> {
+    state_in(dir, from, at, sort::MEMORY)
 }
 
-fn state_in(dir: &Path, at: Option<i32>, memory: usize) -> Result<State> {
+fn state_in(dir: &Path, from: Option<i32>, at: Option<i32>, memory: usize) -> Result<State> {
     let metadata = read_metadata(dir)?;
     let Some(head) = metadata.head_block.as_ref().map(|h| h.number) else {
         bail!("a dump without a head block has no state");
@@ -383,23 +395,28 @@ fn state_in(dir: &Path, at: Option<i32>, memory: usize) -> Result<State> {
     if block > head {
         bail!("block {block} is beyond the dump head {head}");
     }
-    if block < metadata.earliest_block_number {
+    let from = from.unwrap_or(metadata.earliest_block_number);
+    if from < metadata.earliest_block_number {
         bail!(
-            "block {block} is before the dump's earliest block {}",
+            "the dump has no history before its earliest block {}",
             metadata.earliest_block_number
         );
     }
+    if block < from {
+        bail!("block {block} is before block {from}");
+    }
 
     let mut all = Sha256::new();
-    all.update(b"waxwing-state-v1\0");
+    all.update(b"waxwing-state-v2\0");
     all.update(metadata.deployment.as_bytes());
+    all.update(from.to_be_bytes());
     all.update(block.to_be_bytes());
 
     let mut tables = Vec::new();
     for (name, table) in &metadata.tables {
         let mut shape = None;
         let mut leaves = Sorter::<32>::new(memory);
-        visit(dir, table, block, &mut shape, |row| {
+        visit(dir, table, block, from, &mut shape, |row| {
             let mut leaf = Sha256::new();
             leaf.update(row.key);
             match row.end {
@@ -430,6 +447,7 @@ fn state_in(dir: &Path, at: Option<i32>, memory: usize) -> Result<State> {
 
     Ok(State {
         deployment: metadata.deployment,
+        from,
         block,
         tables,
         root: hex::encode(all.finalize()),
@@ -460,14 +478,12 @@ fn diff_in(a: &Path, b: &Path, at: Option<i32>, memory: usize) -> Result<Diff> {
     if block > head_a.min(head_b) {
         bail!("block {block} is beyond a dump head ({head_a} and {head_b})");
     }
-    // A pruned dump has dropped versions the other still holds, which would
-    // all read as divergence.
-    if meta_a.earliest_block_number != meta_b.earliest_block_number {
-        bail!(
-            "the dumps start at different blocks ({} and {}): one is pruned",
-            meta_a.earliest_block_number,
-            meta_b.earliest_block_number
-        );
+    // History the more pruned of the two no longer has is not compared.
+    let from = meta_a
+        .earliest_block_number
+        .max(meta_b.earliest_block_number);
+    if block < from {
+        bail!("block {block} is before block {from}, where the dumps' history starts");
     }
     let names = |m: &super::DumpMetadata| m.tables.keys().cloned().collect::<BTreeSet<_>>();
     if names(&meta_a) != names(&meta_b) {
@@ -478,9 +494,9 @@ fn diff_in(a: &Path, b: &Path, at: Option<i32>, memory: usize) -> Result<Diff> {
     for (name, table_a) in &meta_a.tables {
         let table_b = &meta_b.tables[name];
         let mut shape = None;
-        let mut versions_a = load(a, table_a, block, &mut shape, memory)
+        let mut versions_a = load(a, table_a, block, from, &mut shape, memory)
             .with_context(|| format!("reading {name} in A"))?;
-        let mut versions_b = load(b, table_b, block, &mut shape, memory)
+        let mut versions_b = load(b, table_b, block, from, &mut shape, memory)
             .with_context(|| format!("reading {name} in B"))?;
 
         let mut table = TableDiff {
@@ -552,15 +568,16 @@ fn diff_in(a: &Path, b: &Path, at: Option<i32>, memory: usize) -> Result<Diff> {
         }
 
         let [keys_a, keys_b] = first.map(HashSet::from_iter);
-        table.samples = samples("A", a, table_a, block, &keys_a)?;
+        table.samples = samples("A", a, table_a, block, from, &keys_a)?;
         table
             .samples
-            .extend(samples("B", b, table_b, block, &keys_b)?);
+            .extend(samples("B", b, table_b, block, from, &keys_b)?);
         tables.push(table);
     }
 
     Ok(Diff {
         deployment: meta_a.deployment,
+        from,
         block,
         tables,
     })
@@ -743,8 +760,8 @@ pub(crate) mod tests {
             &[(90, 50)],
         );
         let (a, b) = (
-            state(a.path(), None).unwrap(),
-            state(b.path(), None).unwrap(),
+            state(a.path(), None, None).unwrap(),
+            state(b.path(), None, None).unwrap(),
         );
         assert_eq!(a, b);
         assert_eq!(a.tables[0].versions, 3);
@@ -752,24 +769,32 @@ pub(crate) mod tests {
 
     #[test]
     fn state_changes_with_a_value_a_close_or_the_block() {
-        let base = state(dump(100, &BASE, &[]).path(), None).unwrap().root;
+        let base = state(dump(100, &BASE, &[]).path(), None, None)
+            .unwrap()
+            .root;
 
         let mut rows = BASE;
         rows[2].4 = 8;
         assert_ne!(
-            state(dump(100, &rows, &[]).path(), None).unwrap().root,
+            state(dump(100, &rows, &[]).path(), None, None)
+                .unwrap()
+                .root,
             base
         );
 
         let mut rows = BASE;
         rows[2].2 = Some(70);
         assert_ne!(
-            state(dump(100, &rows, &[]).path(), None).unwrap().root,
+            state(dump(100, &rows, &[]).path(), None, None)
+                .unwrap()
+                .root,
             base
         );
 
         assert_ne!(
-            state(dump(101, &BASE, &[]).path(), None).unwrap().root,
+            state(dump(101, &BASE, &[]).path(), None, None)
+                .unwrap()
+                .root,
             base
         );
     }
@@ -782,10 +807,10 @@ pub(crate) mod tests {
         rows.push((4, 90, None, "b", 9));
         let long = dump(100, &rows, &[]);
         assert_eq!(
-            state(long.path(), Some(80)).unwrap(),
-            state(short.path(), None).unwrap()
+            state(long.path(), None, Some(80)).unwrap(),
+            state(short.path(), None, None).unwrap()
         );
-        assert!(state(long.path(), Some(101)).is_err());
+        assert!(state(long.path(), None, Some(101)).is_err());
     }
 
     #[test]
@@ -798,8 +823,8 @@ pub(crate) mod tests {
         let b = dump(100, &rows, &[(1, 50)]);
         for dir in [&a, &b] {
             assert_eq!(
-                state_in(dir.path(), None, 1).unwrap(),
-                state(dir.path(), None).unwrap()
+                state_in(dir.path(), None, None, 1).unwrap(),
+                state(dir.path(), None, None).unwrap()
             );
         }
         let spilled = diff_in(a.path(), b.path(), None, 1).unwrap();
@@ -834,16 +859,46 @@ pub(crate) mod tests {
 
         let b = dump(100, &BASE, &[]);
         assert_eq!(
-            state(a.path(), None).unwrap(),
-            state(b.path(), None).unwrap()
+            state(a.path(), None, None).unwrap(),
+            state(b.path(), None, None).unwrap()
         );
     }
 
     #[test]
     fn a_chunk_out_of_vid_order_is_refused() {
         let rows = [(2, 10, None, "a", 1), (1, 20, None, "b", 7)];
-        let err = state(dump(100, &rows, &[]).path(), None).unwrap_err();
+        let err = state(dump(100, &rows, &[]).path(), None, None).unwrap_err();
         assert!(format!("{err:#}").contains("not in vid order"), "{err:#}");
+    }
+
+    pub(crate) fn pruned_to(dir: &TempDir, earliest: i32) {
+        let path = dir.path().join("metadata.json");
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        metadata["earliest_block_number"] = json!(earliest);
+        fs::write(&path, metadata.to_string()).unwrap();
+    }
+
+    #[test]
+    fn history_pruned_away_does_not_count() {
+        // BASE's first version of "a" closes at 50. Pruned to 60, graph-node
+        // deletes it; a dump taken before the prune still holds it.
+        let fresh = dump(100, &BASE[1..], &[]);
+        pruned_to(&fresh, 60);
+        let stale = dump(100, &BASE, &[]);
+        pruned_to(&stale, 60);
+        let unpruned = dump(100, &BASE, &[]);
+
+        let state_of = |dir: &TempDir, from| state(dir.path(), from, None).unwrap();
+        assert_eq!(state_of(&stale, None), state_of(&fresh, None));
+        assert_eq!(state_of(&unpruned, Some(60)), state_of(&fresh, None));
+        assert_ne!(state_of(&unpruned, None).root, state_of(&fresh, None).root);
+        assert!(state(fresh.path(), Some(59), None).is_err());
+
+        let diff = diff(unpruned.path(), stale.path(), None).unwrap();
+        assert_eq!((diff.from, diff.first()), (60, None));
+        assert_eq!(diff.tables[0].versions, [2, 2]);
+        assert!(super::diff(unpruned.path(), fresh.path(), Some(59)).is_err());
     }
 
     #[test]

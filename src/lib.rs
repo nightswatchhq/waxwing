@@ -97,7 +97,8 @@ pub struct Catalogue {
     pub graft_block: Option<BlockPtr>,
     pub graph_node_version: Option<String>,
     pub public_poi: Option<String>,
-    /// `state` of the dump at `head_block`: what other indexers attest to.
+    /// `state` of the dump at `head_block`, from `earliest_block_number`:
+    /// what other indexers attest to.
     #[serde(default)]
     pub state_root: Option<String>,
     /// Oldest first; the last layer's head is `head_block`.
@@ -365,6 +366,21 @@ pub fn seal(dir: &Path, opts: SealOptions) -> Result<Catalogue> {
         );
     }
 
+    // Pruning past the last dump's head deletes versions that were open
+    // then and closed since. graphman records closes only for rows that
+    // still exist, so the earlier chunks hold those versions as live.
+    if let Some(prev) = &prev
+        && metadata.earliest_block_number > prev.head_block.number
+    {
+        bail!(
+            "the deployment was pruned to block {} since the last dump at block {}: versions \
+             closed in between are gone without a trace, and the earlier chunks still hold \
+             them as live. Dump afresh into an empty directory",
+            metadata.earliest_block_number,
+            prev.head_block.number
+        );
+    }
+
     let fresh = new_data_files(&metadata, prev.as_ref())?;
 
     let mut files = Vec::new();
@@ -424,7 +440,7 @@ pub fn seal(dir: &Path, opts: SealOptions) -> Result<Catalogue> {
         graph_node_version: opts.graph_node_version,
         public_poi: opts.public_poi,
         state_root: match opts.state {
-            true => Some(state(dir, None)?.root),
+            true => Some(state(dir, None, None)?.root),
             false => None,
         },
         layers,
@@ -510,7 +526,7 @@ pub fn verify(dir: &Path, chain: Option<&dyn Chain>) -> Result<(Catalogue, Vec<P
     // Only once the bytes are known good: a damaged file may not parse.
     if problems.is_empty()
         && let Some(root) = &catalogue.state_root
-        && state(dir, None)?.root != *root
+        && state(dir, Some(catalogue.earliest_block_number), None)?.root != *root
     {
         problems.push(Problem::State);
     }
@@ -699,6 +715,27 @@ pub(crate) mod tests {
         dump_into(dir.path(), 200, 3);
         let err = seal(dir.path(), SealOptions::default()).unwrap_err();
         assert!(err.to_string().contains("unsealed"), "{err}");
+    }
+
+    #[test]
+    fn a_layer_pruned_past_the_last_dump_is_refused() {
+        let pruned_to = |dir: &Path, earliest: i32| {
+            let path = dir.join("metadata.json");
+            let mut metadata: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            metadata["earliest_block_number"] = json!(earliest);
+            fs::write(&path, metadata.to_string()).unwrap();
+        };
+        let dir = dump();
+        seal(dir.path(), SealOptions::default()).unwrap();
+        dump_into(dir.path(), 150, 2);
+        pruned_to(dir.path(), 100);
+        let err = seal(dir.path(), SealOptions::default()).unwrap_err();
+        assert!(err.to_string().contains("pruned to block 100"), "{err}");
+
+        // Pruned only as far as the last dump: every close is in a clamp.
+        pruned_to(dir.path(), 99);
+        seal(dir.path(), SealOptions::default()).unwrap();
     }
 
     #[test]

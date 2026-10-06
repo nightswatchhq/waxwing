@@ -20,6 +20,7 @@ x-graph-node: &graph-node
     # The rig subgraph has a fulltext search, which graph-node otherwise refuses.
     GRAPH_ALLOW_NON_DETERMINISTIC_FULLTEXT_SEARCH: "true"
     GRAPH_STORE_WRITE_BATCH_DURATION: ${GRAPH_STORE_WRITE_BATCH_DURATION:-300}
+    ETHEREUM_REORG_THRESHOLD: ${ETHEREUM_REORG_THRESHOLD:-250}
 
 services:
   anvil:

@@ -71,7 +71,7 @@ What the dump does not have, and waxwing therefore has to add:
   reading of the guard, not a reproduced failure.
 - No graph-node version and no POI recorded in the metadata.
 - No account of pruning between incremental runs, which deletes rows that
-  earlier chunks still hold.
+  earlier chunks still hold; see Pruning.
 
 ## The rig
 
@@ -169,9 +169,35 @@ block. This is the state commitment the POI is not, and what multi-party
 attestation would sign. `data_sources$.parent` is still untested: it was null
 in every row the rig produced.
 
-`seal` records the state root at the head in the catalogue, and `verify`
-recomputes it from the rows. `--no-state` skips it, since hashing reads
-every row.
+The state covers history from a block on: by default the dump's earliest
+block, and the version a dump keeps from before it does not count. That is
+what makes a pruned indexer and an unpruned one comparable. `state --from F`
+leaves out what pruning to F would delete, versions closed at or before F,
+and F is part of the hash. `seal` records the state root at the head, from
+the dump's earliest block, and `verify` recomputes it from the rows.
+`--no-state` skips it, since hashing reads every row.
+
+## Pruning
+
+graph-node prunes by deleting versions closed at or before the new earliest
+block. An incremental dump records no deletions, so the earlier chunks still
+hold them, and `graphman restore` brings them back. Queries do not see them,
+since nothing answers below the earliest block, but they are rows on disk,
+and a dump that holds them differs from one taken afresh.
+
+Pruned no further than the last dump's head, that is all: every version
+pruned was already closed by then, and its close is in the chunks or a clamp
+file. `state` and `diff` leave out history before the earliest block, and
+`cut` and `restore` drop it. Pruned past the last dump's head, a version open
+then and closed since is deleted with its close, and graphman writes clamps
+only for rows that still exist: the earlier chunks hold it as live, and a
+restore gives an entity two current versions. `seal` refuses such a layer.
+
+`rig/prune.sh` prunes A to below its first dump, takes an incremental dump,
+and compares it with one taken afresh: 412 rows in the chunks against 242,
+yet the state roots match, `diff` finds them identical, and `waxwing restore`
+gives B exactly A's rows, with POIs and entities agreeing after both index
+on. Then it prunes past the second dump, and `seal` refuses the third.
 
 ## Memory
 
@@ -354,5 +380,5 @@ complain about in graphman. What remains of it:
 1. Finding attestations: an index of them by deployment, such as a
    subgraph over an event a publisher emits.
 
-And the experiments still owed, small and local: pruning between dumps, a
-grafted deployment, nested data sources (for `parent`).
+And the experiments still owed, small and local: a grafted deployment,
+nested data sources (for `parent`).

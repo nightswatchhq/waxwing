@@ -298,6 +298,14 @@ fn fulltexts(schema: &str) -> Result<Vec<Fulltext>> {
     Ok(out)
 }
 
+/// Rows of a dump not to load.
+struct Skip {
+    /// Loaded before an interruption.
+    after: i64,
+    /// Versions closed at or before this block, pruned at the source.
+    earliest: i32,
+}
+
 fn load_table(
     db: &mut Client,
     dir: &Path,
@@ -305,7 +313,7 @@ fn load_table(
     table: &str,
     dump: &DumpTable,
     fulltext: &[&Fulltext],
-    after: i64,
+    skip: Skip,
 ) -> Result<usize> {
     let mut clamps = Clamps::open(dir, dump)?;
     let mut order = VidOrder::default();
@@ -362,8 +370,15 @@ fn load_table(
                 order.check(vid, &chunk.file)?;
                 let clamp = clamps.end(vid)?;
                 // Loaded before an interruption. Each batch commits whole.
-                if vid <= after {
+                if vid <= skip.after {
                     continue;
+                }
+                // Pruned at the source since an earlier chunk was written.
+                if let (Some(_), Some(ends)) = (starts, ends) {
+                    let end = clamp.or_else(|| ends.is_valid(i).then(|| ends.value(i)));
+                    if end.is_some_and(|end| end <= skip.earliest) {
+                        continue;
+                    }
                 }
                 copied += 1;
                 let mut first = true;
@@ -588,8 +603,19 @@ pub fn restore(dir: &Path, options: &RestoreOptions, mut progress: impl FnMut(&s
             _ => progress(&format!("loading {name} after vid {after}")),
         }
         let fulltext: Vec<&Fulltext> = fulltexts.iter().filter(|f| &f.table == name).collect();
-        let rows = load_table(&mut db, dir, &nsp, name, table, &fulltext, after)
-            .with_context(|| format!("loading {name}"))?;
+        let rows = load_table(
+            &mut db,
+            dir,
+            &nsp,
+            name,
+            table,
+            &fulltext,
+            Skip {
+                after,
+                earliest: metadata.earliest_block_number,
+            },
+        )
+        .with_context(|| format!("loading {name}"))?;
         progress(&format!("loaded {name}: {rows} rows"));
     }
 

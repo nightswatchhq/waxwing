@@ -50,6 +50,10 @@ enum Command {
         /// The indexer you sign for, when the key is its operator's
         #[arg(long)]
         indexer: Option<String>,
+        /// Commit to history from this block on, to match a sealed dump
+        /// that starts later than yours; your earliest block when omitted
+        #[arg(long)]
+        from: Option<i32>,
         /// Also add the attestation to IPFS through this Kubo API, and
         /// print its CID
         #[arg(long)]
@@ -167,6 +171,10 @@ enum Command {
         /// Hash the state as of this block rather than the dump head
         #[arg(long)]
         at: Option<i32>,
+        /// Leave out history before this block, as pruning to it would;
+        /// the dump's earliest block when omitted
+        #[arg(long)]
+        from: Option<i32>,
     },
 }
 
@@ -211,6 +219,7 @@ fn main() -> Result<ExitCode> {
             rpc,
             indexer,
             publish,
+            from,
         } => {
             let at = match at.as_deref() {
                 None => None,
@@ -224,8 +233,8 @@ fn main() -> Result<ExitCode> {
             let chain = rpc.map(RpcChain::new);
             let chain = chain.as_ref().map(|c| c as &dyn Chain);
             let state = match at {
-                Some(at) => state(&dir, Some(cut_block(&dir, at, chain)?.number))?,
-                None => state(&dir, None)?,
+                Some(at) => state(&dir, from, Some(cut_block(&dir, at, chain)?.number))?,
+                None => state(&dir, from, None)?,
             };
             let block = cut_block(&dir, CutAt::Block(state.block), chain).or_else(|e| {
                 // The head's hash is in the dump itself; anything lower is not.
@@ -242,6 +251,7 @@ fn main() -> Result<ExitCode> {
                 &key,
                 &state.deployment,
                 &block,
+                state.from,
                 &state.root,
                 indexer.as_deref(),
             )?;
@@ -272,6 +282,7 @@ fn main() -> Result<ExitCode> {
                 version: 2,
                 deployment: catalogue.deployment,
                 block: catalogue.head_block,
+                from: catalogue.earliest_block_number,
                 state_root,
                 indexer: None,
                 signer: String::new(),
@@ -353,8 +364,8 @@ fn main() -> Result<ExitCode> {
             );
             Ok(ExitCode::SUCCESS)
         }
-        Command::State { dir, at } => {
-            let state = state(&dir, at)?;
+        Command::State { dir, at, from } => {
+            let state = state(&dir, from, at)?;
             for table in &state.tables {
                 println!(
                     "{:<20} {} {} versions",
@@ -362,8 +373,8 @@ fn main() -> Result<ExitCode> {
                 );
             }
             println!(
-                "state {} at block {}: {}",
-                state.deployment, state.block, state.root
+                "state {} at block {} from {}: {}",
+                state.deployment, state.block, state.from, state.root
             );
             Ok(ExitCode::SUCCESS)
         }
@@ -424,7 +435,13 @@ fn main() -> Result<ExitCode> {
         }
         Command::Diff { a, b, at } => {
             let diff = diff(&a, &b, at)?;
-            println!("comparing {} as of block {}", diff.deployment, diff.block);
+            match diff.from {
+                0 => println!("comparing {} as of block {}", diff.deployment, diff.block),
+                from => println!(
+                    "comparing {} as of block {}, from block {from} on",
+                    diff.deployment, diff.block
+                ),
+            }
             for table in &diff.tables {
                 let Some(first) = table.first_block else {
                     println!(
