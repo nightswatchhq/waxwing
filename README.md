@@ -23,7 +23,9 @@ waxwing diff <dump-dir-a> <dump-dir-b> [--at BLOCK]
 waxwing state <dump-dir> [--at BLOCK]
 waxwing cut <src-dump-dir> <dst-dir> --at BLOCK|final [--rpc URL]
 waxwing attest <own-dump-dir> --key-file FILE [--at BLOCK|final] [--rpc URL]
-waxwing attested <dump-dir> <attestation.json>... [--signer 0x…]... [--threshold K]
+               [--indexer 0x…] [--publish IPFS_API]
+waxwing attested <dump-dir> <attestation.json|CID>... [--network-rpc URL] [--ipfs IPFS_API]
+                 [--indexer 0x…]... [--threshold K]
 waxwing indexes <dump-dir> --db URL [--namespace sgdN] [--apply]
 waxwing restore <dump-dir> --db URL --config graphman.toml --work DIR --name NAME --node NODE
                 [--graphman CMD] [--work-as PATH] [--shard SHARD] [--primary-db URL]
@@ -169,19 +171,37 @@ before), 558 MB for `diff` against itself (15.6 GB before) and 56 MB for
 An indexer who synced the deployment itself runs `waxwing attest` on its own
 dump: the state root as of a block, signed as an Ethereum personal message
 with any secp256k1 key, so the signer is an address and `cast wallet verify`
-accepts the signature. The receiver of somebody else's dump runs
-`waxwing attested` with the attestations it has collected and the addresses
-it is prepared to believe, and gets a count of distinct signers who agree
-with the catalogue's deployment, block and state root.
+accepts the signature. The attestation names the indexer it speaks for, the
+signer itself unless `--indexer` says otherwise, and that name is part of
+what is signed. `--publish` also adds it to IPFS through a Kubo API and
+prints the CID.
 
-`rig/independent.sh` ends with B attesting to its own copy and A's sealed
-dump passing against it, and failing against a signer who did not sign.
+The receiver of somebody else's dump runs `waxwing attested` with the
+attestations it has collected, as files or CIDs, and gets a count of
+distinct indexers who agree with the catalogue's deployment, block and
+state root. With `--network-rpc`, an Arbitrum One endpoint, Graph Horizon is
+the referee: an indexer counts only with tokens provisioned to the subgraph
+service and not thawing (`getProviderTokensAvailable`), and only if it
+signed itself or the signer is an operator it authorised there
+(`isAuthorized`). An indexer and its operators count once. Without
+`--network-rpc` nothing ties a key to an indexer, every key counts as
+itself, and keys are free. Version 1 attestations, which name no indexer,
+still verify as their signer's.
 
-What this does not do: decide who is worth believing. Without `--signer`
-every key counts, and keys are free. Tying a signer to an indexer with stake
-on the network is not built, nor is any way to publish or find attestations.
-The attester and the dump must be at the same block, which is what
-`cut --at final` and `attest --at` are for.
+`rig/independent.sh` ends with B attesting to its own copy, and A's sealed
+dump passing against it and failing against a signer who did not sign. Then
+it forks Arbitrum One with anvil, has a real staked indexer authorise B's
+key as its operator, and has B sign for that indexer and publish to the
+rig's IPFS: A's dump, checked against the CID with the fork as referee,
+counts the indexer and its stake, and B's unstaked attestation counts for
+nothing. `cargo test -- --ignored` checks the staking calls against
+Arbitrum One itself.
+
+What this does not do: find attestations. A CID has to be passed along by
+whoever published it; there is no index of attestations by deployment. The
+stake is read at the latest block, not the attested one. The attester and
+the dump must be at the same block, which is what `cut --at final` and
+`attest --at` are for.
 
 ## Cut
 
@@ -313,8 +333,8 @@ move the ratio either way.
 [docs/graphman-issues.md](docs/graphman-issues.md) is a scan of what operators
 complain about in graphman. What remains of it:
 
-1. Attestations: check a signer is an indexer or its operator on the
-   network, and somewhere to publish and find them.
+1. Finding attestations: an index of them by deployment, such as a
+   subgraph over an event a publisher emits.
 
 And the experiments still owed: nested data sources (for `parent`), real
 deployments on a real network, restore time per TB, pruning between dumps, a

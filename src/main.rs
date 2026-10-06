@@ -4,8 +4,9 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use waxwing::{
-    Attestation, Chain, CutAt, RestoreOptions, RpcChain, SealOptions, apply_indexes, attest, cut,
-    cut_block, diff, index_plan, is_final, read_catalogue, restore, seal, state, tally, verify,
+    Attestation, Chain, CutAt, RestoreOptions, RpcChain, RpcStaking, SealOptions, Staking,
+    apply_indexes, attest, cut, cut_block, diff, index_plan, ipfs_add, ipfs_cat, is_cid, is_final,
+    read_catalogue, restore, seal, state, tally, verify,
 };
 
 #[derive(Parser)]
@@ -46,18 +47,33 @@ enum Command {
         /// Ethereum JSON-RPC endpoint, needed for a block below the head
         #[arg(long)]
         rpc: Option<String>,
+        /// The indexer you sign for, when the key is its operator's
+        #[arg(long)]
+        indexer: Option<String>,
+        /// Also add the attestation to IPFS through this Kubo API, and
+        /// print its CID
+        #[arg(long)]
+        publish: Option<String>,
     },
-    /// Count the signers whose attestations agree with a sealed dump
+    /// Count the indexers whose attestations agree with a sealed dump
     Attested {
         dir: PathBuf,
-        /// Attestation files, as written by `attest`
+        /// Attestation files as written by `attest`, or their IPFS CIDs
         #[arg(required = true)]
-        attestations: Vec<PathBuf>,
-        /// Count only these addresses; repeat for each. Without it any key
-        /// counts, which proves nothing about who signed
+        attestations: Vec<String>,
+        /// Count only these indexers; repeat for each
+        #[arg(long, alias = "signer")]
+        indexer: Vec<String>,
+        /// Arbitrum One JSON-RPC endpoint: count only indexers with stake on
+        /// the subgraph service, signing themselves or through an operator
+        /// they authorised. Without it any key counts, which proves nothing
+        /// about who signed
         #[arg(long)]
-        signer: Vec<String>,
-        /// Fail unless at least this many distinct signers agree
+        network_rpc: Option<String>,
+        /// Kubo API to read CIDs from
+        #[arg(long)]
+        ipfs: Option<String>,
+        /// Fail unless at least this many distinct indexers agree
         #[arg(long, default_value_t = 1)]
         threshold: usize,
     },
@@ -193,6 +209,8 @@ fn main() -> Result<ExitCode> {
             key_file,
             at,
             rpc,
+            indexer,
+            publish,
         } => {
             let at = match at.as_deref() {
                 None => None,
@@ -220,14 +238,30 @@ fn main() -> Result<ExitCode> {
             })?;
             let key = std::fs::read_to_string(&key_file)
                 .with_context(|| format!("reading {}", key_file.display()))?;
-            let attestation = attest(&key, &state.deployment, &block, &state.root)?;
-            println!("{}", serde_json::to_string_pretty(&attestation)?);
+            let attestation = attest(
+                &key,
+                &state.deployment,
+                &block,
+                &state.root,
+                indexer.as_deref(),
+            )?;
+            let json = serde_json::to_string_pretty(&attestation)?;
+            println!("{json}");
+            if let Some(api) = publish {
+                let name = format!(
+                    "{}-{}.json",
+                    attestation.deployment, attestation.block.number
+                );
+                eprintln!("published {}", ipfs_add(&api, &name, json.as_bytes())?);
+            }
             Ok(ExitCode::SUCCESS)
         }
         Command::Attested {
             dir,
             attestations,
-            signer,
+            indexer,
+            network_rpc,
+            ipfs,
             threshold,
         } => {
             let catalogue = read_catalogue(&dir)?;
@@ -235,41 +269,63 @@ fn main() -> Result<ExitCode> {
                 .state_root
                 .context("the catalogue records no state root: seal without --no-state")?;
             let expected = Attestation {
-                version: 1,
+                version: 2,
                 deployment: catalogue.deployment,
                 block: catalogue.head_block,
                 state_root,
+                indexer: None,
                 signer: String::new(),
                 signature: String::new(),
             };
             let mut read = Vec::new();
-            for path in &attestations {
-                let raw =
-                    std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-                let attestation: Attestation = serde_json::from_slice(&raw)
-                    .with_context(|| format!("parsing {}", path.display()))?;
+            for source in &attestations {
+                let raw = if is_cid(source) && !std::path::Path::new(source).exists() {
+                    let api = ipfs.as_deref().context("--ipfs is needed to read a CID")?;
+                    ipfs_cat(api, source)?
+                } else {
+                    std::fs::read(source).with_context(|| format!("reading {source}"))?
+                };
+                let attestation: Attestation =
+                    serde_json::from_slice(&raw).with_context(|| format!("parsing {source}"))?;
                 read.push(attestation);
             }
-            let signers = tally(&expected, &read, &signer);
-            for address in &signers {
-                println!("agrees: {address}");
+            let staking = network_rpc.map(RpcStaking::new);
+            let agreed = tally(
+                &expected,
+                &read,
+                &indexer,
+                staking.as_ref().map(|s| s as &dyn Staking),
+            )?;
+            for agreement in &agreed {
+                match (agreement.stake, agreement.signer == agreement.indexer) {
+                    (Some(stake), true) => println!(
+                        "agrees: indexer {} with {} GRT available",
+                        agreement.indexer,
+                        stake / 10u128.pow(18)
+                    ),
+                    (Some(stake), false) => println!(
+                        "agrees: indexer {} with {} GRT available, signed by its operator {}",
+                        agreement.indexer,
+                        stake / 10u128.pow(18),
+                        agreement.signer
+                    ),
+                    (None, _) => println!("agrees: {}", agreement.signer),
+                }
             }
             println!(
-                "{} of {} attestation(s) agree on state {} at block {}, from {} signer(s); need {threshold}",
-                read.iter()
-                    .filter(|a| a.recover().is_ok_and(|s| signers.contains(&s)))
-                    .count(),
+                "{} of {} attestation(s) agree on state {} at block {}, for {} indexer(s); need {threshold}",
+                read.iter().filter(|a| a.agrees_with(&expected)).count(),
                 read.len(),
                 expected.state_root,
                 expected.block.number,
-                signers.len()
+                agreed.len()
             );
-            if signer.is_empty() {
+            if staking.is_none() {
                 println!(
-                    "no --signer given: any key counts, so this shows agreement, not who agrees"
+                    "no --network-rpc given: any key counts, so this shows agreement, not who agrees"
                 );
             }
-            Ok(if signers.len() >= threshold {
+            Ok(if agreed.len() >= threshold {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE

@@ -47,4 +47,29 @@ if waxwing attested work/dumps/rig-a work/attestation-b.json \
   --signer 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 >/dev/null; then
   echo "FAIL: an attestation counted for a signer who did not make it" >&2; fail=1
 fi
+
+# On the network, through IPFS: a fork of Arbitrum One on which a real
+# indexer with stake has made B's key its operator. B signs for it and
+# publishes; A's dump is checked against the CID with the fork as referee.
+FORK=http://localhost:18546
+INDEXER=0xfeff9093f6b32d0e5cddba743b06a1fedb87c004
+OPERATOR=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
+anvil --fork-url "${ARBITRUM_RPC:-https://arb1.arbitrum.io/rpc}" --port 18546 >/dev/null 2>&1 &
+fork=$!
+trap 'kill $fork 2>/dev/null' EXIT
+until cast block-number --rpc-url $FORK >/dev/null 2>&1; do sleep 0.5; done
+cast rpc --rpc-url $FORK anvil_impersonateAccount $INDEXER >/dev/null
+cast rpc --rpc-url $FORK anvil_setBalance $INDEXER 0xde0b6b3a7640000 >/dev/null
+cast send --rpc-url $FORK --unlocked --from $INDEXER 0x00669A4CF01450B64E8A2A20E9b1FCB71E61eF03 \
+  "setOperator(address,address,bool)" 0xb2Bb92d0DE618878E438b55D5846cfecD9301105 $OPERATOR true >/dev/null
+
+waxwing attest work/dumps/rig-b --key-file work/key-b --indexer $INDEXER \
+  --publish http://localhost:15001 > work/attestation-op.json 2> work/publish.log
+CID=$(awk '/^published/ {print $2}' work/publish.log)
+echo "attestation for $INDEXER, signed by its operator, at $CID"
+waxwing attested work/dumps/rig-a "$CID" --ipfs http://localhost:15001 --network-rpc $FORK || fail=1
+# B's own key has no stake: its plain attestation counts for nothing here.
+if waxwing attested work/dumps/rig-a work/attestation-b.json --network-rpc $FORK >/dev/null; then
+  echo "FAIL: an unstaked signer counted on the network" >&2; fail=1
+fi
 exit $fail
