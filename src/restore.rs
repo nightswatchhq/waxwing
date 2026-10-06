@@ -54,7 +54,9 @@ fn sql_name(object: &str) -> String {
 }
 
 /// The dump's metadata with every row and the head taken out: what graphman
-/// needs to create the deployment, its tables and its metadata.
+/// needs to create the deployment, its tables and its metadata. The graft
+/// goes too: graphman looks the base up on the receiver, which need not
+/// have it, since the rows copied from it are in the dump.
 fn skeleton(raw: &serde_json::Value) -> Result<serde_json::Value> {
     let mut skeleton = raw.clone();
     let tables = skeleton["tables"]
@@ -65,6 +67,8 @@ fn skeleton(raw: &serde_json::Value) -> Result<serde_json::Value> {
         table["clamps"] = serde_json::json!([]);
     }
     skeleton["head_block"] = serde_json::Value::Null;
+    skeleton["graft_base"] = serde_json::Value::Null;
+    skeleton["graft_block"] = serde_json::Value::Null;
     Ok(skeleton)
 }
 
@@ -641,6 +645,16 @@ pub fn restore(dir: &Path, options: &RestoreOptions, mut progress: impl FnMut(&s
         "update subgraphs.deployment set postponed_indexes_created = true where id = $1",
         &[&site],
     )?;
+    // Where the rows came from, as the source recorded it.
+    if let (Some(base), Some(block)) = (&metadata.graft_base, &metadata.graft_block) {
+        let hash = hex::decode(block.hash.trim_start_matches("0x")).context("graft block hash")?;
+        db.execute(
+            "update subgraphs.deployment
+                set graft_base = $2, graft_block_number = $3, graft_block_hash = $4
+              where id = $1",
+            &[&site, base, &block.number, &hash],
+        )?;
+    }
 
     progress(&format!("handing {nsp} to {}", options.node));
     graphman(
@@ -754,6 +768,7 @@ indexers = ["index_node_0"]
         });
         let skeleton = skeleton(&raw).unwrap();
         assert_eq!(skeleton["head_block"], serde_json::Value::Null);
+        assert_eq!(skeleton["graft_base"], serde_json::Value::Null);
         assert_eq!(skeleton["tables"]["Token"]["chunks"], serde_json::json!([]));
         assert_eq!(skeleton["tables"]["Token"]["clamps"], serde_json::json!([]));
         assert_eq!(skeleton["tables"]["Token"]["max_vid"], 4);

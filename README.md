@@ -177,6 +177,22 @@ and F is part of the hash. `seal` records the state root at the head, from
 the dump's earliest block, and `verify` recomputes it from the rows.
 `--no-state` skips it, since hashing reads every row.
 
+## Grafts
+
+A grafted deployment starts as a copy of another's rows up to a block, and
+its dump holds those rows. `graphman restore` nonetheless looks the graft
+base up on the receiver, to choose a schema version, and fails with
+"graft_base not found" where it is absent. `waxwing restore` leaves the
+graft out of the skeleton graphman creates, and writes it back into the
+deployment's metadata once the rows are in. The receiver gets the latest
+schema version rather than the base's, which matters only for a base
+created before graph-node's current layout.
+
+`rig/graft.sh` grafts a second deployment onto the rig subgraph on A and
+hands it to B, which never had the base: graphman refuses it, waxwing
+restores it, and B indexes on. POIs and entities agree at the graft block,
+the dump head and later, and `diff` finds the two nodes' dumps identical.
+
 ## Pruning
 
 graph-node prunes by deleting versions closed at or before the new earliest
@@ -380,5 +396,5 @@ complain about in graphman. What remains of it:
 1. Finding attestations: an index of them by deployment, such as a
    subgraph over an event a publisher emits.
 
-And the experiments still owed, small and local: a grafted deployment,
-nested data sources (for `parent`).
+And the experiment still owed, small and local: nested data sources (for
+`parent`).
