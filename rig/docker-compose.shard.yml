@@ -1,0 +1,14 @@
+# B with a second shard: deployments land in shard1, the catalogue stays in
+# the primary. Used by shard.sh.
+services:
+  postgres-b2:
+    image: postgres:16
+    command: ["postgres", "-cshared_preload_libraries=pg_stat_statements", "-cmax_connections=200"]
+    environment:
+      POSTGRES_USER: graph-node
+      POSTGRES_PASSWORD: let-me-in
+      POSTGRES_DB: graph-node
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
+    ports: ["35432:5432"]
+  graph-node-b:
+    depends_on: [anvil, ipfs, postgres-b, postgres-b2]

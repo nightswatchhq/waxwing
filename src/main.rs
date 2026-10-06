@@ -134,6 +134,10 @@ enum Command {
         /// The receiving database, as postgresql://user:password@host/db
         #[arg(long)]
         db: String,
+        /// The primary database, where graph-node's catalogue of deployments
+        /// lives, if not the same as --db
+        #[arg(long)]
+        primary_db: Option<String>,
         /// The deployment's namespace (sgdN), where the database has several
         /// copies
         #[arg(long)]
@@ -423,12 +427,20 @@ fn main() -> Result<ExitCode> {
         Command::Indexes {
             dir,
             db,
+            primary_db,
             namespace,
             apply,
         } => {
             let mut db = postgres::Client::connect(&db, postgres::NoTls)
                 .context("connecting to the database")?;
-            let plan = index_plan(&dir, &mut db, namespace.as_deref())?;
+            let mut primary = match primary_db {
+                Some(url) => Some(
+                    postgres::Client::connect(&url, postgres::NoTls)
+                        .context("connecting to the primary database")?,
+                ),
+                None => None,
+            };
+            let plan = index_plan(&dir, &mut db, primary.as_mut(), namespace.as_deref())?;
             println!(
                 "{}: {} to build, {} to drop",
                 plan.namespace,

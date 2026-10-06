@@ -12,6 +12,8 @@ use super::read_metadata;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexPlan {
     pub namespace: String,
+    /// The deployment's id in graph-node's catalogue, where known.
+    pub site: Option<i32>,
     /// Statements building the indexes the dump has and the deployment
     /// does not.
     pub create: Vec<String>,
@@ -132,41 +134,61 @@ fn plan(
         .collect();
     Ok(IndexPlan {
         namespace: nsp.to_string(),
+        site: None,
         create,
         drop,
     })
 }
 
 /// Compare the indexes of the deployment restored from `dir` with the ones
-/// the dump recorded. `namespace` picks one copy where the database holds
-/// several.
-pub fn index_plan(dir: &Path, db: &mut Client, namespace: Option<&str>) -> Result<IndexPlan> {
+/// the dump recorded. `db` is the shard holding it; `primary`, where that
+/// is another database, holds graph-node's catalogue of deployments.
+/// `namespace` picks one copy where there are several.
+pub fn index_plan(
+    dir: &Path,
+    db: &mut Client,
+    primary: Option<&mut Client>,
+    namespace: Option<&str>,
+) -> Result<IndexPlan> {
     let metadata = read_metadata(dir)?;
     if metadata.indexes.is_empty() {
         bail!("the dump records no indexes");
     }
 
-    let copies: Vec<String> = db
+    let copies: Vec<(i32, String)> = primary
+        .unwrap_or(db)
         .query(
-            "select name from public.deployment_schemas where subgraph = $1 order by name",
+            "select id, name::text from public.deployment_schemas where subgraph = $1 order by name",
             &[&metadata.deployment],
         )?
         .iter()
-        .map(|row| row.get(0))
+        .map(|row| (row.get(0), row.get(1)))
         .collect();
-    let nsp = match (namespace, copies.as_slice()) {
-        (Some(nsp), _) if copies.iter().any(|c| c == nsp) => nsp.to_string(),
-        (Some(nsp), _) => bail!("{nsp} is not a copy of {}", metadata.deployment),
-        (None, [nsp]) => nsp.clone(),
+    let names = || {
+        copies
+            .iter()
+            .map(|c| c.1.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let (site, nsp) = match (namespace, copies.as_slice()) {
+        (Some(nsp), _) => copies
+            .iter()
+            .find(|c| c.1 == nsp)
+            .cloned()
+            .with_context(|| format!("{nsp} is not a copy of {}", metadata.deployment))?,
+        (None, [copy]) => copy.clone(),
         (None, []) => bail!("{} is not in this database", metadata.deployment),
         (None, _) => bail!(
             "{} has copies in {}: pick one with --namespace",
             metadata.deployment,
-            copies.join(", ")
+            names()
         ),
     };
 
-    plan_in(db, &nsp, &metadata.indexes, true)
+    let mut plan = plan_in(db, &nsp, &metadata.indexes, true)?;
+    plan.site = Some(site);
+    Ok(plan)
 }
 
 /// Plan the dumped `indexes` against what namespace `nsp` has now.
@@ -212,11 +234,30 @@ pub fn apply(plan: &IndexPlan, db: &mut Client, mut progress: impl FnMut(&str)) 
         db.batch_execute(sql)
             .with_context(|| format!("running `{sql}`"))?;
     }
-    db.execute(
-        "update subgraphs.deployment set postponed_indexes_created = true
-          where id = (select id from public.deployment_schemas where name = $1)",
-        &[&plan.namespace],
-    )?;
+    let site = plan
+        .site
+        .context("the plan does not know the deployment's id")?;
+    postponed_indexes_created(db, site)
+}
+
+/// Tell graph-node the deployment's postponed indexes exist, so it does not
+/// add back ones the source did not have. Releases before postponed index
+/// creation have no such flag, and nothing to add.
+pub(crate) fn postponed_indexes_created(db: &mut Client, site: i32) -> Result<()> {
+    let flag: bool = db
+        .query_one(
+            "select exists (select 1 from information_schema.columns
+              where table_schema = 'subgraphs' and table_name = 'deployment'
+                and column_name = 'postponed_indexes_created')",
+            &[],
+        )?
+        .get(0);
+    if flag {
+        db.execute(
+            "update subgraphs.deployment set postponed_indexes_created = true where id = $1",
+            &[&site],
+        )?;
+    }
     Ok(())
 }
 

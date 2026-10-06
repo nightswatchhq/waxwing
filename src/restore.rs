@@ -17,7 +17,7 @@ use inflector::Inflector;
 use postgres::Client;
 
 use super::diff::{Clamps, VidOrder, batches, int32, vids};
-use super::indexes::plan_in;
+use super::indexes::{plan_in, postponed_indexes_created};
 use super::{DumpTable, check_relative, read_metadata};
 
 /// The node a deployment is assigned to while waxwing loads it.
@@ -641,10 +641,7 @@ pub fn restore(dir: &Path, options: &RestoreOptions, mut progress: impl FnMut(&s
         &[&site, &head.number, &hash, &entity_count],
     )
     .context("setting the head")?;
-    db.execute(
-        "update subgraphs.deployment set postponed_indexes_created = true where id = $1",
-        &[&site],
-    )?;
+    postponed_indexes_created(&mut db, site)?;
     // Where the rows came from, as the source recorded it.
     if let (Some(base), Some(block)) = (&metadata.graft_base, &metadata.graft_block) {
         let hash = hex::decode(block.hash.trim_start_matches("0x")).context("graft block hash")?;

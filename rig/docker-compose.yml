@@ -39,6 +39,7 @@ services:
   # The publisher.
   graph-node-a:
     <<: *graph-node
+    image: ${GRAPH_NODE_IMAGE_A:-${GRAPH_NODE_IMAGE:-graphprotocol/graph-node:v0.45.0}}
     depends_on: [anvil, ipfs, postgres-a]
     ports: ["18000:8000", "18020:8020", "18030:8030"]
     environment:
@@ -48,6 +49,7 @@ services:
   # The receiver. Never told about the subgraph except through restore.
   graph-node-b:
     <<: *graph-node
+    image: ${GRAPH_NODE_IMAGE_B:-${GRAPH_NODE_IMAGE:-graphprotocol/graph-node:v0.45.0}}
     depends_on: [anvil, ipfs, postgres-b]
     ports: ["28000:8000", "28020:8020", "28030:8030"]
     environment:
