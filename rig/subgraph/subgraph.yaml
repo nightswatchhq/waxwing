@@ -1,4 +1,6 @@
 specVersion: 1.2.0
+features:
+  - fullTextSearch
 schema:
   file: ./schema.graphql
 dataSources:

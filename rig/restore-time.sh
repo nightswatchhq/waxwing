@@ -15,7 +15,7 @@ setup
 NSP=$(psql a "select name from deployment_schemas where subgraph = '$DEPLOYMENT'")
 B=$(head_block)
 psql a "insert into $NSP.ping_event (block\$, id, child, n, block)
-  select $B, int8send(i), int8send(i % 1000), i, $B from generate_series(1000, 999 + $ROWS) i" >/dev/null
+  select $B, int8send(i), (select id from $NSP.child order by vid limit 1), i, $B from generate_series(1000, 999 + $ROWS) i" >/dev/null
 psql a "insert into $NSP.child (block_range, id, pings, created_at)
   select int4range($B, null), int8send(i), i, $B from generate_series(1000, 999 + $ROWS) i" >/dev/null
 echo "padded with $ROWS pings and $ROWS children: $(psql a "select pg_size_pretty(sum(pg_total_relation_size(c.oid))) from pg_class c join pg_namespace n on n.oid = c.relnamespace where nspname = '$NSP'")"

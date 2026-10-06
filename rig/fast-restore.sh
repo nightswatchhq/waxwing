@@ -31,6 +31,18 @@ waxwing restore $DUMP --db postgresql://graph-node:let-me-in@localhost:25432/gra
 if diff <(indexes a) <(indexes b); then echo "ok        index set"; else
   echo "MISMATCH  index set (< A, > B)"; fail=1
 fi
+# Lexemes only: graph-node orders a search's fields by a per-process hash,
+# so two nodes can disagree on positions for the same row.
+lexemes() {
+  local nsp; nsp=$(psql $1 "select name from deployment_schemas where subgraph = '$DEPLOYMENT'")
+  psql $1 "select md5(string_agg(vid || ':' || strip(child_search)::text, ',' order by vid)) from $nsp.child"
+}
+check "fulltext lexemes of restored children" "$(lexemes a)" "$(lexemes b)"
+search() {
+  gql "$1/subgraphs/id/$DEPLOYMENT" '{ childSearch(text: "louder") { id } }' | jq -c '[.data.childSearch[].id] | sort'
+}
+check "fulltext search" "$(search $A_QUERY)" "$(search $B_QUERY)"
+
 spawn; pings 30
 wait_synced $A_INDEX; wait_synced $B_INDEX
 compare $((F1 - 10)) "$F1" $((F2 - 10)) "$F2" "$(head_block)"

@@ -79,7 +79,9 @@ It runs two graph-node v0.45.0 installations with separate databases against
 one anvil chain, and:
 
 1. syncs a factory subgraph on A (dynamic data sources, two mutable entities,
-   one immutable), takes a full dump, then an incremental dump 31 blocks on;
+   one immutable, a fulltext search, so both nodes run with
+   `GRAPH_ALLOW_NON_DETERMINISTIC_FULLTEXT_SEARCH`), takes a full dump, then
+   an incremental dump 31 blocks on;
 2. seals the directory with the public POI at the dump head, and verifies it;
 3. restores it into B, which has never been told about the subgraph, and lets
    both index a further 31 blocks;
@@ -265,17 +267,38 @@ is kept as a measurement, not proposed upstream.
 
 `--graphman` is how to run graphman (`docker exec -i graph-node graphman`),
 and `--work-as` where graphman sees the work directory, if elsewhere. The
-subgraph name must exist (`graphman create`). Not handled: fulltext fields,
-which graphman computes on import (waxwing refuses such a schema); resuming
-an interrupted restore (drop the parked deployment and start again); and
-graph-node versions that keep the head anywhere but `subgraphs.head`.
+subgraph name must exist (`graphman create`).
+
+A dump leaves out `@fulltext` columns, and graph-node computes them on
+insert. waxwing reads the directives from `schema.graphql` and loads such a
+table through a temporary staging table, computing each tsvector as
+graph-node does: `to_tsvector` per included field, concatenated. graph-node
+takes the fields in hash-set order, which varies by process, so its own
+tsvectors for one row can differ in word positions between two nodes;
+waxwing uses the directive's order.
+
+An interrupted restore is resumed by running the same command again. A
+deployment still parked, with no head and waxwing's config in `--work`, is
+taken as one: graphman is skipped, and each table loads from past its
+highest `vid`, since every `COPY` batch commits whole. Indexes are dropped
+and rebuilt, and a deployment that already has its head is only reassigned.
+Not handled: graph-node versions that keep the head anywhere but
+`subgraphs.head`.
 
 `rig/fast-restore.sh` takes a full and an incremental dump of A, with an
 attribute index dropped in between, restores with waxwing into B on stock
-v0.45.0, and lets B index on by itself. The index sets match, POIs and
+v0.45.0, and lets B index on by itself. The index sets match, the
+restored fulltext column matches A's and answers the same search, POIs and
 entities agree at five blocks, and a final `diff` of the two nodes' dumps
 is identical. B picks the deployment up from the reassignment, with no
 restart.
+
+`rig/resume.sh` pads A with 3M versions in each of two tables, kills
+`waxwing restore` while it loads the second, and runs it again: on
+2026-10-06 the kill came at 635,904 of 3,000,060 pings, the second run
+loaded the rest, and row counts, checksums, fulltext lexemes, the index
+count and the head then matched A, as did the POI and entities once both
+nodes had indexed on.
 
 `rig/restore-time.sh` pads A with 5M versions in each of two tables
 (3.7 GB), dumps, and times restore into a fresh B: 369 s with graphman on
@@ -290,8 +313,7 @@ move the ratio either way.
 [docs/graphman-issues.md](docs/graphman-issues.md) is a scan of what operators
 complain about in graphman. What remains of it:
 
-1. Restore: fulltext fields, and resuming an interrupted load.
-2. Attestations: check a signer is an indexer or its operator on the
+1. Attestations: check a signer is an indexer or its operator on the
    network, and somewhere to publish and find them.
 
 And the experiments still owed: nested data sources (for `parent`), real

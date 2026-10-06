@@ -185,16 +185,150 @@ fn copy_field(out: &mut Vec<u8>, value: Option<&str>) {
 }
 
 /// Load one table's chunks into `nsp.table`, clamp files folded in.
+/// A `@fulltext` search: a tsvector column on the table of the entity it
+/// includes, which graph-node computes on insert and a dump leaves out.
+#[derive(Debug, PartialEq, Eq)]
+struct Fulltext {
+    table: String,
+    column: String,
+    /// A text search configuration, quoted, as graph-node writes it.
+    language: &'static str,
+    fields: Vec<String>,
+}
+
+impl Fulltext {
+    /// The expression graph-node inserts: one `to_tsvector` per non-null
+    /// field, concatenated. A null field gives an empty tsvector, which
+    /// concatenation leaves alone.
+    fn expression(&self) -> String {
+        let parts: Vec<String> = self
+            .fields
+            .iter()
+            .map(|f| format!("to_tsvector({}, coalesce(\"{f}\", ''))", self.language))
+            .collect();
+        match parts.is_empty() {
+            true => "''::tsvector".to_string(),
+            false => format!("({})", parts.join(" || ")),
+        }
+    }
+}
+
+fn language(code: &str) -> Result<&'static str> {
+    // graph-node's spellings, `portugese` included.
+    Ok(match code {
+        "simple" => "'simple'",
+        "da" => "'danish'",
+        "nl" => "'dutch'",
+        "en" => "'english'",
+        "fi" => "'finnish'",
+        "fr" => "'french'",
+        "de" => "'german'",
+        "hu" => "'hungarian'",
+        "it" => "'italian'",
+        "no" => "'norwegian'",
+        "pt" => "'portugese'",
+        "ro" => "'romanian'",
+        "ru" => "'russian'",
+        "es" => "'spanish'",
+        "sv" => "'swedish'",
+        "tr" => "'turkish'",
+        other => bail!("unknown fulltext language {other}"),
+    })
+}
+
+/// The `@fulltext` directives on `_Schema_`.
+fn fulltexts(schema: &str) -> Result<Vec<Fulltext>> {
+    use graphql_parser::schema::{Definition, TypeDefinition, Value};
+
+    let document = graphql_parser::parse_schema::<String>(schema)
+        .map_err(|e| anyhow::anyhow!("parsing schema.graphql: {e}"))?;
+    let mut out = Vec::new();
+    for definition in &document.definitions {
+        let Definition::TypeDefinition(TypeDefinition::Object(object)) = definition else {
+            continue;
+        };
+        if object.name != "_Schema_" {
+            continue;
+        }
+        for directive in object.directives.iter().filter(|d| d.name == "fulltext") {
+            let arg = |name: &str| {
+                directive
+                    .arguments
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, v)| v)
+                    .with_context(|| format!("@fulltext without {name}"))
+            };
+            let Value::String(name) = arg("name")? else {
+                bail!("@fulltext name is not a string");
+            };
+            let Value::Enum(code) = arg("language")? else {
+                bail!("@fulltext language is not an enum");
+            };
+            // graph-node allows one included entity.
+            let Value::List(include) = arg("include")? else {
+                bail!("@fulltext include is not a list");
+            };
+            let Some(Value::Object(entity)) = include.first() else {
+                bail!("@fulltext {name} includes no entity");
+            };
+            let (Some(Value::String(entity_name)), Some(Value::List(fields))) =
+                (entity.get("entity"), entity.get("fields"))
+            else {
+                bail!("@fulltext {name} has a malformed include");
+            };
+            let mut columns = Vec::new();
+            for field in fields {
+                let Value::Object(field) = field else {
+                    bail!("@fulltext {name} has a malformed field");
+                };
+                let Some(Value::String(field)) = field.get("name") else {
+                    bail!("@fulltext {name} has a field without a name");
+                };
+                columns.push(field.to_snake_case());
+            }
+            out.push(Fulltext {
+                table: sql_name(entity_name),
+                column: name.to_snake_case(),
+                language: language(code)?,
+                fields: columns,
+            });
+        }
+    }
+    Ok(out)
+}
+
 fn load_table(
     db: &mut Client,
     dir: &Path,
     nsp: &str,
     table: &str,
     dump: &DumpTable,
+    fulltext: &[&Fulltext],
+    after: i64,
 ) -> Result<usize> {
     let mut clamps = Clamps::open(dir, dump)?;
     let mut order = VidOrder::default();
     let mut rows = 0;
+
+    // With fulltext columns, rows go through a staging table so the
+    // tsvectors are computed as they are inserted, not by a second pass.
+    let target = match fulltext.is_empty() {
+        true => format!("\"{nsp}\".\"{table}\""),
+        false => {
+            let mut sql = format!(
+                "create temp table waxwing_stage (like \"{nsp}\".\"{table}\" including defaults)"
+            );
+            for f in fulltext {
+                sql.push_str(&format!(
+                    "; alter table waxwing_stage drop column \"{}\"",
+                    f.column
+                ));
+            }
+            db.batch_execute(&sql)?;
+            "waxwing_stage".to_string()
+        }
+    };
 
     for chunk in &dump.chunks {
         check_relative(&chunk.file)?;
@@ -219,16 +353,19 @@ fn load_table(
                     name => columns.push(format!("\"{}\"", name.replace('"', "\"\""))),
                 }
             }
-            let sql = format!(
-                "copy \"{nsp}\".\"{table}\" ({}) from stdin",
-                columns.join(", ")
-            );
+            let sql = format!("copy {target} ({}) from stdin", columns.join(", "));
 
             let mut out = Vec::new();
+            let mut copied = 0;
             for i in 0..batch.num_rows() {
                 let vid = vids.value(i);
                 order.check(vid, &chunk.file)?;
                 let clamp = clamps.end(vid)?;
+                // Loaded before an interruption. Each batch commits whole.
+                if vid <= after {
+                    continue;
+                }
+                copied += 1;
                 let mut first = true;
                 for (field, column) in schema.fields().iter().zip(batch.columns()) {
                     let value = match field.name().as_str() {
@@ -252,13 +389,32 @@ fn load_table(
                 out.push(b'\n');
             }
 
+            if copied == 0 {
+                continue;
+            }
             let mut writer = db.copy_in(&sql)?;
             writer.write_all(&out)?;
             writer
                 .finish()
                 .with_context(|| format!("loading {}", chunk.file))?;
-            rows += batch.num_rows();
+            if !fulltext.is_empty() {
+                let names: Vec<String> = fulltext
+                    .iter()
+                    .map(|f| format!("\"{}\"", f.column))
+                    .collect();
+                let exprs: Vec<String> = fulltext.iter().map(|f| f.expression()).collect();
+                let columns = columns.join(", ");
+                db.batch_execute(&format!(
+                    "insert into \"{nsp}\".\"{table}\" ({columns}, {}) select {columns}, {} from waxwing_stage; truncate waxwing_stage",
+                    names.join(", "),
+                    exprs.join(", ")
+                ))?;
+            }
+            rows += copied;
         }
+    }
+    if !fulltext.is_empty() {
+        db.batch_execute("drop table waxwing_stage")?;
     }
     Ok(rows)
 }
@@ -268,11 +424,7 @@ pub fn restore(dir: &Path, options: &RestoreOptions, mut progress: impl FnMut(&s
     let metadata = read_metadata(dir)?;
     let schema =
         fs::read_to_string(dir.join("schema.graphql")).context("reading schema.graphql")?;
-    if schema.contains("@fulltext") {
-        bail!(
-            "the schema has fulltext fields, which waxwing cannot restore yet: use graphman restore"
-        );
-    }
+    let fulltexts = fulltexts(&schema)?;
     let Some(head) = &metadata.head_block else {
         bail!("dump has no head block");
     };
@@ -286,69 +438,106 @@ pub fn restore(dir: &Path, options: &RestoreOptions, mut progress: impl FnMut(&s
         None => None,
     };
 
-    // The skeleton and the parked config, where graphman can read them.
-    if options.work.exists() && fs::read_dir(&options.work)?.next().is_some() {
-        bail!("{} is not empty", options.work.display());
-    }
-    let skeleton_dir = options.work.join("skeleton");
-    fs::create_dir_all(&skeleton_dir)?;
     let raw: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("metadata.json"))?)?;
-    fs::write(
-        skeleton_dir.join("metadata.json"),
-        serde_json::to_vec_pretty(&skeleton(&raw)?)?,
-    )?;
-    for file in ["schema.graphql", "subgraph.yaml"] {
-        if dir.join(file).exists() {
-            fs::copy(dir.join(file), skeleton_dir.join(file))?;
-        }
-    }
-    let config = fs::read_to_string(&options.config)
-        .with_context(|| format!("reading {}", options.config.display()))?;
-    fs::write(
-        options.work.join("graphman.toml"),
-        parked_config(&config, &options.name, &options.shard)?,
-    )?;
     let work_as = match &options.work_as {
         Some(path) => path.trim_end_matches('/').to_string(),
-        None => fs::canonicalize(&options.work)?.display().to_string(),
+        None => {
+            fs::create_dir_all(&options.work)?;
+            fs::canonicalize(&options.work)?.display().to_string()
+        }
     };
     let graphman_config = format!("{work_as}/graphman.toml");
 
-    progress("creating the deployment with graphman, parked");
-    graphman(
-        options,
-        &graphman_config,
-        &[
-            "restore",
-            &format!("{work_as}/skeleton"),
-            "--name",
-            &options.name,
-            "--shard",
-            &options.shard,
-        ],
-    )?;
+    let find = |db: &mut Client| -> Result<Option<(i32, String, Option<String>)>> {
+        let row = db.query_opt(
+            "select s.id, s.name::text, a.node_id
+               from public.deployment_schemas s
+               left join subgraphs.subgraph_deployment_assignment a on a.id = s.id
+              where s.subgraph = $1 and s.shard = $2",
+            &[&metadata.deployment, &options.shard],
+        )?;
+        Ok(row.map(|row| (row.get(0), row.get(1), row.get(2))))
+    };
+    let existing = find(primary.as_mut().unwrap_or(&mut db))?;
+    let resuming = existing.is_some();
+    if resuming {
+        // Only a restore of ours, interrupted, is parked with this work dir.
+        if !options.work.join("graphman.toml").exists() {
+            bail!(
+                "{} already exists in shard {}, and {} holds no restore of waxwing's to resume",
+                metadata.deployment,
+                options.shard,
+                options.work.display()
+            );
+        }
+    } else {
+        if options.work.exists() && fs::read_dir(&options.work)?.next().is_some() {
+            bail!("{} is not empty", options.work.display());
+        }
+        // The skeleton and the parked config, where graphman can read them.
+        let skeleton_dir = options.work.join("skeleton");
+        fs::create_dir_all(&skeleton_dir)?;
+        fs::write(
+            skeleton_dir.join("metadata.json"),
+            serde_json::to_vec_pretty(&skeleton(&raw)?)?,
+        )?;
+        for file in ["schema.graphql", "subgraph.yaml"] {
+            if dir.join(file).exists() {
+                fs::copy(dir.join(file), skeleton_dir.join(file))?;
+            }
+        }
+        let config = fs::read_to_string(&options.config)
+            .with_context(|| format!("reading {}", options.config.display()))?;
+        fs::write(
+            options.work.join("graphman.toml"),
+            parked_config(&config, &options.name, &options.shard)?,
+        )?;
 
-    let catalogue = primary.as_mut().unwrap_or(&mut db);
-    let Some(row) = catalogue.query_opt(
-        "select s.id, s.name::text, a.node_id
-           from public.deployment_schemas s
-           left join subgraphs.subgraph_deployment_assignment a on a.id = s.id
-          where s.subgraph = $1 and s.shard = $2",
-        &[&metadata.deployment, &options.shard],
-    )?
-    else {
+        progress("creating the deployment with graphman, parked");
+        graphman(
+            options,
+            &graphman_config,
+            &[
+                "restore",
+                &format!("{work_as}/skeleton"),
+                "--name",
+                &options.name,
+                "--shard",
+                &options.shard,
+            ],
+        )?;
+    }
+
+    let Some((site, nsp, node)) = find(primary.as_mut().unwrap_or(&mut db))? else {
         bail!(
             "graphman did not create {} in shard {}",
             metadata.deployment,
             options.shard
         );
     };
-    let (site, nsp, node): (i32, String, Option<String>) = (row.get(0), row.get(1), row.get(2));
     if node.as_deref() != Some(PARKED_NODE) {
         bail!(
             "{nsp} is assigned to {node:?}, not {PARKED_NODE}, and may be indexing: \
-             graphman did not apply the parking rule. Drop it with `graphman drop {nsp}`"
+             it is not a restore of waxwing's. Drop it with `graphman drop {nsp}`"
         );
+    }
+    let loaded: Option<i32> = db
+        .query_one(
+            "select block_number from subgraphs.head where id = $1",
+            &[&site],
+        )?
+        .get(0);
+    if loaded.is_some() {
+        progress(&format!("{nsp} is already loaded"));
+        progress(&format!("handing {nsp} to {}", options.node));
+        return graphman(
+            options,
+            &graphman_config,
+            &["reassign", &nsp, &options.node],
+        );
+    }
+    if resuming {
+        progress(&format!("resuming the restore into {nsp}"));
     }
 
     let mut tables = BTreeMap::new();
@@ -388,8 +577,18 @@ pub fn restore(dir: &Path, options: &RestoreOptions, mut progress: impl FnMut(&s
     }
 
     for (name, table) in &tables {
-        progress(&format!("loading {name}"));
-        let rows = load_table(&mut db, dir, &nsp, name, table)
+        let after: i64 = db
+            .query_one(
+                &format!("select coalesce(max(vid), -1)::int8 from \"{nsp}\".\"{name}\""),
+                &[],
+            )?
+            .get(0);
+        match after {
+            -1 => progress(&format!("loading {name}")),
+            _ => progress(&format!("loading {name} after vid {after}")),
+        }
+        let fulltext: Vec<&Fulltext> = fulltexts.iter().filter(|f| &f.table == name).collect();
+        let rows = load_table(&mut db, dir, &nsp, name, table, &fulltext, after)
             .with_context(|| format!("loading {name}"))?;
         progress(&format!("loaded {name}: {rows} rows"));
     }
@@ -459,6 +658,40 @@ mod tests {
         let mut out = Vec::new();
         copy_field(&mut out, literal(&text, 0).unwrap().as_deref());
         assert_eq!(out, b"a\\tb\\\\c\"d\\n");
+    }
+
+    #[test]
+    fn fulltext_directives_become_columns_and_expressions() {
+        let schema = r#"
+type _Schema_
+  @fulltext(
+    name: "childSearch"
+    language: en
+    algorithm: rank
+    include: [{ entity: "Child", fields: [{ name: "label" }, { name: "noteText" }] }]
+  )
+
+type Child @entity { id: Bytes! label: String! noteText: String }
+"#;
+        let found = fulltexts(schema).unwrap();
+        assert_eq!(
+            found,
+            [Fulltext {
+                table: "child".into(),
+                column: "child_search".into(),
+                language: "'english'",
+                fields: vec!["label".into(), "note_text".into()],
+            }]
+        );
+        assert_eq!(
+            found[0].expression(),
+            "(to_tsvector('english', coalesce(\"label\", '')) || to_tsvector('english', coalesce(\"note_text\", '')))"
+        );
+        assert!(
+            fulltexts("type Child @entity { id: Bytes! }")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

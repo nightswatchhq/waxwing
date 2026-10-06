@@ -17,6 +17,8 @@ x-graph-node: &graph-node
     BLOCK_INGESTOR: default
     GRAPH_LOG: info
     ETHEREUM_POLLING_INTERVAL: 500
+    # The rig subgraph has a fulltext search, which graph-node otherwise refuses.
+    GRAPH_ALLOW_NON_DETERMINISTIC_FULLTEXT_SEARCH: "true"
 
 services:
   anvil:

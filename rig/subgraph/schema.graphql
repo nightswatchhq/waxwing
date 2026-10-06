@@ -1,3 +1,11 @@
+type _Schema_
+  @fulltext(
+    name: "childSearch"
+    language: en
+    algorithm: rank
+    include: [{ entity: "Child", fields: [{ name: "label" }, { name: "note" }] }]
+  )
+
 type Stats @entity(immutable: false) {
   id: ID!
   spawned: Int!
@@ -8,6 +16,8 @@ type Child @entity(immutable: false) {
   id: Bytes!
   pings: BigInt!
   createdAt: BigInt!
+  label: String!
+  note: String
 }
 
 type PingEvent @entity(immutable: true) {
