@@ -178,6 +178,31 @@ impl Clamps {
     }
 }
 
+/// Refuse a `data_sources$` table with a `parent` set. It holds another
+/// data source's `vid`, which differs between indexers, so a state over it
+/// would not be shared. graph-node at 6838f4e3c never writes it.
+fn check_no_parents(dir: &Path, name: &str, table: &DumpTable) -> Result<()> {
+    if name != "data_sources$" {
+        return Ok(());
+    }
+    for chunk in &table.chunks {
+        check_relative(&chunk.file)?;
+        for batch in batches(&dir.join(&chunk.file))? {
+            let batch = batch?;
+            if let Some(parent) = batch.column_by_name("parent")
+                && parent.null_count() < parent.len()
+            {
+                bail!(
+                    "{} sets data_sources$.parent, a vid that differs between indexers: \
+                     waxwing cannot commit to it",
+                    chunk.file
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Call `f` for every version in a table as it stood at block `cut`, from
 /// block `from` on: clamp files applied, later versions dropped, later
 /// closes undone, and versions closed at or before `from` left out, as
@@ -414,6 +439,7 @@ fn state_in(dir: &Path, from: Option<i32>, at: Option<i32>, memory: usize) -> Re
 
     let mut tables = Vec::new();
     for (name, table) in &metadata.tables {
+        check_no_parents(dir, name, table)?;
         let mut shape = None;
         let mut leaves = Sorter::<32>::new(memory);
         visit(dir, table, block, from, &mut shape, |row| {
@@ -492,6 +518,8 @@ fn diff_in(a: &Path, b: &Path, at: Option<i32>, memory: usize) -> Result<Diff> {
 
     let mut tables = Vec::new();
     for (name, table_a) in &meta_a.tables {
+        check_no_parents(a, name, table_a)?;
+        check_no_parents(b, name, &meta_b.tables[name])?;
         let table_b = &meta_b.tables[name];
         let mut shape = None;
         let mut versions_a = load(a, table_a, block, from, &mut shape, memory)
@@ -899,6 +927,39 @@ pub(crate) mod tests {
         assert_eq!((diff.from, diff.first()), (60, None));
         assert_eq!(diff.tables[0].versions, [2, 2]);
         assert!(super::diff(unpruned.path(), fresh.path(), Some(59)).is_err());
+    }
+
+    #[test]
+    fn a_data_source_parent_is_refused() {
+        let with_parent = |parent: Option<i32>| {
+            let dir = dump(100, &BASE, &[]);
+            fs::create_dir(dir.path().join("data_sources$")).unwrap();
+            write(
+                &dir.path().join("data_sources$/chunk_000000.parquet"),
+                Schema::new(vec![
+                    Field::new("vid", DataType::Int64, false),
+                    Field::new("block_range_start", DataType::Int32, false),
+                    Field::new("block_range_end", DataType::Int32, true),
+                    Field::new("parent", DataType::Int32, true),
+                ]),
+                vec![
+                    Arc::new(Int64Array::from(vec![1])),
+                    Arc::new(Int32Array::from(vec![5])),
+                    Arc::new(Int32Array::from(vec![None])),
+                    Arc::new(Int32Array::from(vec![parent])),
+                ],
+            );
+            let path = dir.path().join("metadata.json");
+            let mut metadata: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            metadata["tables"]["data_sources$"] =
+                json!({ "chunks": [ { "file": "data_sources$/chunk_000000.parquet" } ] });
+            fs::write(&path, metadata.to_string()).unwrap();
+            dir
+        };
+        assert!(state(with_parent(None).path(), None, None).is_ok());
+        let err = state(with_parent(Some(1)).path(), None, None).unwrap_err();
+        assert!(err.to_string().contains("parent"), "{err}");
     }
 
     #[test]

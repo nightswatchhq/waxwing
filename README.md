@@ -166,8 +166,14 @@ entity version as of a block, independent of `vid`, row order, Parquet
 encoding and whether a close arrived in a chunk or a clamp file. On the rig
 the two nodes produce the same state root at their head and at an earlier
 block. This is the state commitment the POI is not, and what multi-party
-attestation would sign. `data_sources$.parent` is still untested: it was null
-in every row the rig produced.
+attestation would sign.
+
+`data_sources$.parent` is the one column holding a `vid`, another data
+source's, which would make a state differ between indexers. graph-node at
+`6838f4e3c` never writes it: not when indexing, nested templates included,
+nor when copying a graft; only `graphman restore` passes a dump's value
+through. So it is null everywhere, and `state` and `diff` refuse a dump in
+which it is not, rather than disagree quietly.
 
 The state covers history from a block on: by default the dump's earliest
 block, and the version a dump keeps from before it does not count. That is
@@ -396,5 +402,5 @@ complain about in graphman. What remains of it:
 1. Finding attestations: an index of them by deployment, such as a
    subgraph over an event a publisher emits.
 
-And the experiment still owed, small and local: nested data sources (for
-`parent`).
+The experiments the research note owed are done, at the rig's scale; the
+rest is scale itself.
