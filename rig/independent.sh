@@ -68,6 +68,17 @@ waxwing attest work/dumps/rig-b --key-file work/key-b --indexer $INDEXER \
 CID=$(awk '/^published/ {print $2}' work/publish.log)
 echo "attestation for $INDEXER, signed by its operator, at $CID"
 waxwing attested work/dumps/rig-a "$CID" --ipfs http://localhost:15001 --network-rpc $FORK || fail=1
+# And on the Ethereum Attestation Service, found by deployment alone: the
+# schema registered once, B's key publishing as the indexer's operator.
+cast send --rpc-url $FORK --private-key $KEY 0xA310da9c5B885E7fb3fbA9D66E9Ba6Df512b78eB \
+  "register(string,address,bool)" \
+  "string deployment,uint32 block,bytes32 blockHash,uint32 from,bytes32 stateRoot" \
+  0x0000000000000000000000000000000000000000 true >/dev/null
+waxwing attest work/dumps/rig-b --key-file work/key-b --indexer $INDEXER --eas $FORK \
+  > /dev/null 2> work/eas.log
+echo "$(cat work/eas.log)"
+waxwing attested work/dumps/rig-a --eas $FORK --network-rpc $FORK || fail=1
+
 # B's own key has no stake: its plain attestation counts for nothing here.
 if waxwing attested work/dumps/rig-a work/attestation-b.json --network-rpc $FORK >/dev/null; then
   echo "FAIL: an unstaked signer counted on the network" >&2; fail=1

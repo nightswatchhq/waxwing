@@ -10,7 +10,8 @@ use sha2::{Digest, Sha256};
 
 mod attest;
 mod cut;
-pub use attest::{Agreement, Attestation, attest, statement, tally};
+pub use attest::{Agreement, Attestation, Claim, attest, statement, tally, tally_claims};
+pub mod eas;
 mod network;
 pub use network::{RpcStaking, Staking, ipfs_add, ipfs_cat, is_cid};
 mod diff;

@@ -23,9 +23,9 @@ waxwing diff <dump-dir-a> <dump-dir-b> [--at BLOCK]
 waxwing state <dump-dir> [--at BLOCK]
 waxwing cut <src-dump-dir> <dst-dir> --at BLOCK|final [--rpc URL]
 waxwing attest <own-dump-dir> --key-file FILE [--at BLOCK|final] [--rpc URL]
-               [--indexer 0x…] [--publish IPFS_API]
-waxwing attested <dump-dir> <attestation.json|CID>... [--network-rpc URL] [--ipfs IPFS_API]
-                 [--indexer 0x…]... [--threshold K]
+               [--indexer 0x…] [--from BLOCK] [--publish IPFS_API] [--eas URL]
+waxwing attested <dump-dir> [<attestation.json|CID>...] [--eas URL [--since BLOCK]]
+                 [--network-rpc URL] [--ipfs IPFS_API] [--indexer 0x…]... [--threshold K]
 waxwing indexes <dump-dir> --db URL [--namespace sgdN] [--apply]
 waxwing restore <dump-dir> --db URL --config graphman.toml --work DIR --name NAME --node NODE
                 [--graphman CMD] [--work-as PATH] [--shard SHARD] [--primary-db URL]
@@ -263,9 +263,34 @@ counts the indexer and its stake, and B's unstaked attestation counts for
 nothing. `cargo test -- --ignored` checks the staking calls against
 Arbitrum One itself.
 
-What this does not do: find attestations. A CID has to be passed along by
-whoever published it; there is no index of attestations by deployment. The
-stake is read at the latest block, not the attested one. The attester and
+To be found by deployment rather than passed along, an attestation goes on
+the Ethereum Attestation Service on Arbitrum One (`0xbD75…c458`). `attest
+--eas URL` sends it from the key file as an EAS attestation under waxwing's
+schema, `string deployment,uint32 block,bytes32 blockHash,uint32 from,bytes32
+stateRoot`, with the indexer as recipient; the transaction is the signature,
+so the chain vouches for who sent it. waxwing builds and signs that
+transaction itself. `attested --eas URL` reads every unrevoked attestation
+of the dump's deployment under the schema since `--since` (by default
+block 512,000,000, which no waxwing attestation can predate) and tallies
+them with the rest, the stake check included.
+
+`rig/independent.sh` does this on its Arbitrum One fork: it registers the
+schema, B publishes for the staked indexer whose operator it has been made,
+and `attested --eas` finds that one attestation from the dump alone and
+counts the indexer.
+
+The schema is not yet registered on Arbitrum One itself, which is one
+transaction from any funded key, and the first `attest --eas` there would
+fail without it:
+
+```
+cast send --rpc-url https://arb1.arbitrum.io/rpc --private-key … \
+  0xA310da9c5B885E7fb3fbA9D66E9Ba6Df512b78eB "register(string,address,bool)" \
+  "string deployment,uint32 block,bytes32 blockHash,uint32 from,bytes32 stateRoot" \
+  0x0000000000000000000000000000000000000000 true
+```
+
+The stake is read at the latest block, not the attested one. The attester and
 the dump must be at the same block, which is what `cut --at final` and
 `attest --at` are for.
 
@@ -399,8 +424,7 @@ move the ratio either way.
 [docs/graphman-issues.md](docs/graphman-issues.md) is a scan of what operators
 complain about in graphman. What remains of it:
 
-1. Finding attestations: an index of them by deployment, such as a
-   subgraph over an event a publisher emits.
+1. Register the EAS schema on Arbitrum One (above): one transaction.
 
 The experiments the research note owed are done, at the rig's scale; the
 rest is scale itself.

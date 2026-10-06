@@ -4,9 +4,9 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use waxwing::{
-    Attestation, Chain, CutAt, RestoreOptions, RpcChain, RpcStaking, SealOptions, Staking,
+    Attestation, Chain, Claim, CutAt, RestoreOptions, RpcChain, RpcStaking, SealOptions, Staking,
     apply_indexes, attest, cut, cut_block, diff, index_plan, ipfs_add, ipfs_cat, is_cid, is_final,
-    read_catalogue, restore, seal, state, tally, verify,
+    read_catalogue, restore, seal, state, tally_claims, verify,
 };
 
 #[derive(Parser)]
@@ -54,6 +54,11 @@ enum Command {
         /// that starts later than yours; your earliest block when omitted
         #[arg(long)]
         from: Option<i32>,
+        /// Also put it on the Ethereum Attestation Service through this
+        /// Arbitrum One endpoint, sent with --key-file, where `attested
+        /// --eas` finds it by deployment. Costs a transaction's gas
+        #[arg(long)]
+        eas: Option<String>,
         /// Also add the attestation to IPFS through this Kubo API, and
         /// print its CID
         #[arg(long)]
@@ -63,8 +68,14 @@ enum Command {
     Attested {
         dir: PathBuf,
         /// Attestation files as written by `attest`, or their IPFS CIDs
-        #[arg(required = true)]
         attestations: Vec<String>,
+        /// Also count every attestation of the deployment on the Ethereum
+        /// Attestation Service, read through this Arbitrum One endpoint
+        #[arg(long)]
+        eas: Option<String>,
+        /// Arbitrum One block to search EAS from
+        #[arg(long, default_value_t = waxwing::eas::SINCE)]
+        since: u64,
         /// Count only these indexers; repeat for each
         #[arg(long, alias = "signer")]
         indexer: Vec<String>,
@@ -220,6 +231,7 @@ fn main() -> Result<ExitCode> {
             indexer,
             publish,
             from,
+            eas,
         } => {
             let at = match at.as_deref() {
                 None => None,
@@ -257,6 +269,12 @@ fn main() -> Result<ExitCode> {
             )?;
             let json = serde_json::to_string_pretty(&attestation)?;
             println!("{json}");
+            if let Some(url) = eas {
+                eprintln!(
+                    "on EAS as {}",
+                    waxwing::eas::publish(&url, &key, &attestation)?
+                );
+            }
             if let Some(api) = publish {
                 let name = format!(
                     "{}-{}.json",
@@ -269,6 +287,8 @@ fn main() -> Result<ExitCode> {
         Command::Attested {
             dir,
             attestations,
+            eas,
+            since,
             indexer,
             network_rpc,
             ipfs,
@@ -300,10 +320,32 @@ fn main() -> Result<ExitCode> {
                     serde_json::from_slice(&raw).with_context(|| format!("parsing {source}"))?;
                 read.push(attestation);
             }
+            if read.is_empty() && eas.is_none() {
+                anyhow::bail!("give attestation files, CIDs, or --eas to find them on chain");
+            }
+            let mut claims: Vec<Claim> = read
+                .iter()
+                .filter_map(|a| {
+                    Some(Claim {
+                        signer: a.recover().ok()?,
+                        attestation: a.clone(),
+                    })
+                })
+                .collect();
+            if let Some(url) = &eas {
+                let found = waxwing::eas::find(url, &expected.deployment, since)?;
+                println!(
+                    "found {} attestation(s) of {} on EAS",
+                    found.len(),
+                    expected.deployment
+                );
+                read.extend(found.iter().map(|c| c.attestation.clone()));
+                claims.extend(found);
+            }
             let staking = network_rpc.map(RpcStaking::new);
-            let agreed = tally(
+            let agreed = tally_claims(
                 &expected,
-                &read,
+                &claims,
                 &indexer,
                 staking.as_ref().map(|s| s as &dyn Staking),
             )?;

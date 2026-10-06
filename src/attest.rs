@@ -167,6 +167,14 @@ pub struct Agreement {
     pub stake: Option<u128>,
 }
 
+/// An attestation whose signer is known: recovered from its signature, or
+/// the sender of the transaction that put it on chain.
+#[derive(Debug, Clone)]
+pub struct Claim {
+    pub attestation: Attestation,
+    pub signer: String,
+}
+
 /// The distinct indexers whose validly signed attestations say what
 /// `expected` says, among `allowed` if any are given.
 ///
@@ -181,13 +189,33 @@ pub fn tally(
     allowed: &[String],
     staking: Option<&dyn Staking>,
 ) -> Result<Vec<Agreement>> {
+    let claims: Vec<Claim> = attestations
+        .iter()
+        .filter_map(|a| {
+            Some(Claim {
+                signer: a.recover().ok()?,
+                attestation: a.clone(),
+            })
+        })
+        .collect();
+    tally_claims(expected, &claims, allowed, staking)
+}
+
+/// `tally` over claims whose signers are already established.
+pub fn tally_claims(
+    expected: &Attestation,
+    claims: &[Claim],
+    allowed: &[String],
+    staking: Option<&dyn Staking>,
+) -> Result<Vec<Agreement>> {
     let allowed: Vec<String> = allowed.iter().map(|a| hex0x(a)).collect();
     let mut counted: BTreeMap<String, Agreement> = BTreeMap::new();
-    for attestation in attestations.iter().filter(|a| a.agrees_with(expected)) {
-        let Ok(signer) = attestation.recover() else {
-            continue;
-        };
-        let claimed = attestation.indexer.as_deref().map(hex0x);
+    for claim in claims
+        .iter()
+        .filter(|c| c.attestation.agrees_with(expected))
+    {
+        let signer = hex0x(&claim.signer);
+        let claimed = claim.attestation.indexer.as_deref().map(hex0x);
         let (indexer, stake) = match staking {
             None => (signer.clone(), None),
             Some(staking) => {
