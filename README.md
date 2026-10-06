@@ -220,32 +220,40 @@ finalized block (40): the head dump fails `--require-final`, the cut passes.
 
 ## Indexes
 
-`graphman restore` builds the default index set before importing a row,
-and ignores the `indexes` the dump records. A deployment whose operator
+`graphman restore` builds graph-node's default index set before importing a
+row, and ignores the `indexes` the dump records. A deployment whose operator
 dropped or added indexes comes back with the defaults, and every row of the
 import pays for maintaining them (graph-node#6722 is the same complaint
-about copy). This is not fixable from outside, so it is a graph-node patch:
-branch `pete/restore-dump-indexes` in graph-node, against `6838f4e3c`.
-Restore creates the tables bare, imports, then builds the dump's own
-indexes, and marks postponed indexes done so they are not added back later.
-The exclusion constraint or index is still created as the layout defines it.
-The dump's index SQL did not parse back as written (`if not exists`, and
-namespace `sgd`), so `CreateIndex::parse` now accepts both.
+about copy).
 
-`rig/indexes.sh` drops an attribute index on A, adds one by hand, dumps and
-restores into B, and compares the index sets. Stock v0.45.0 fails it: B
-gets the dropped index back and lacks the manual one. The patched build
-(`GRAPH_NODE_IMAGE=waxwing/graph-node:restore-indexes`, built from that
-branch with `docker/Dockerfile`) passes, and so do the other four rig
-scripts on it. The time saved on a large restore is not measured.
+`waxwing indexes <dump-dir> --db postgresql://…` fixes the first half with a
+stock graph-node. It compares the restored deployment's indexes with the
+dump's list and prints the statements; with `--apply` it builds what is
+missing, drops the surplus, both `concurrently`, and sets
+`postponed_indexes_created` so graph-node does not add postponed ones back.
+It never drops an index backing a constraint. A BRIN index it has to build
+gets the plain operator class, since the dump does not record
+`minmax_multi_ops`. `rig/indexes.sh` drops an attribute index on A, adds one
+by hand, restores into B with stock v0.45.0, and runs it: the two index
+sets then match, and POIs and entities agree after B indexes on.
+
+The second half, the import time, is not fixable from outside graphman.
+graph-node branch `pete/restore-dump-indexes` (on cargopete/graph-node,
+against `6838f4e3c`) creates the tables bare and builds the dump's indexes
+after the import; it is kept as a measurement, not proposed upstream.
+`rig/restore-time.sh` pads A with 5M versions in each of two tables
+(3.7 GB), dumps, and times restore into a fresh B: 372 s on stock v0.45.0,
+176 s on the patched build. Getting that back without a patched graph-node
+means waxwing doing the import itself.
 
 ## Next
 
 [docs/graphman-issues.md](docs/graphman-issues.md) is a scan of what operators
 complain about in graphman. What remains of it:
 
-1. Indexes on restore: measure the restore time saved on a large
-   deployment, then propose the patch upstream.
+1. Restore time: waxwing doing the import, with indexes built after it.
+   graphman assigns a restored deployment to a node as it finishes, so a
+   copy waxwing is still loading has to be kept from being indexed.
 2. Attestations: check a signer is an indexer or its operator on the
    network, and somewhere to publish and find them.
 
