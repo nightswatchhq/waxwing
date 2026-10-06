@@ -14,6 +14,7 @@ pub use attest::{Attestation, attest, statement, tally};
 mod diff;
 pub use cut::{Cut, CutAt, cut, cut_block, dump_head};
 pub use diff::{Diff, State, TableDiff, TableState, diff, state};
+mod sort;
 
 pub const CATALOGUE_FILE: &str = "catalogue.json";
 pub const CATALOGUE_VERSION: u32 = 1;

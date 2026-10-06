@@ -145,8 +145,19 @@ attestation would sign. `data_sources$.parent` is still untested: it was null
 in every row the rig produced.
 
 `seal` records the state root at the head in the catalogue, and `verify`
-recomputes it from the rows. `--no-state` skips it for dumps too large to
-hash in memory.
+recomputes it from the rows. `--no-state` skips it, since hashing reads
+every row.
+
+## Memory
+
+`state` and `diff` sort each table's versions on disk, in anonymous files
+under `TMPDIR`, once a table passes 256 MB of them: 32 bytes a version for
+`state`, 44 a side for `diff`. Clamp files are read alongside the chunks
+rather than loaded, which is why chunks and clamps out of `vid` order are
+refused; graph-node writes both in `vid` order. On a synthetic table of 40M
+versions and 10M clamps, peak memory was 297 MB for `state` (1.7 GB
+before), 558 MB for `diff` against itself (15.6 GB before) and 56 MB for
+`cut`, with the same roots.
 
 ## Attestation
 
@@ -221,9 +232,7 @@ graph-node's restore: create only the indexes in the dump's metadata.
 complain about in graphman. What remains of it:
 
 1. Indexes on restore, as a graph-node patch.
-2. Diff, state and cut for large tables: bounded memory, sort and merge on
-   disk. Cut already streams; diff and state do not.
-3. Attestations: check a signer is an indexer or its operator on the
+2. Attestations: check a signer is an indexer or its operator on the
    network, and somewhere to publish and find them.
 
 And the experiments still owed: nested data sources (for `parent`), real

@@ -1,4 +1,5 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::cmp::Ordering;
+use std::collections::{BTreeSet, HashSet};
 use std::fs::File;
 use std::path::Path;
 
@@ -10,6 +11,7 @@ use arrow::util::display::{ArrayFormatter, FormatOptions};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use sha2::{Digest, Sha256};
 
+use super::sort::{self, Sorter};
 use super::{DumpTable, check_relative, read_metadata};
 
 const SAMPLES: usize = 3;
@@ -18,12 +20,6 @@ const SAMPLES: usize = 3;
 /// detail, and the upper bound is the one thing a version changes later.
 type Key = [u8; 32];
 type Shape = Vec<(String, DataType)>;
-
-struct Version {
-    start: i32,
-    /// More than one only if the dump holds the same version twice.
-    ends: Vec<Option<i32>>,
-}
 
 struct Row<'a> {
     key: Key,
@@ -65,7 +61,7 @@ impl Diff {
     }
 }
 
-pub(super) fn batches(path: &Path) -> Result<impl Iterator<Item = Result<RecordBatch>>> {
+pub(super) fn batches(path: &Path) -> Result<impl Iterator<Item = Result<RecordBatch>> + use<>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
     Ok(reader.map(|batch| Ok(batch?)))
@@ -81,25 +77,103 @@ pub(super) fn int32<'a>(
         .with_context(|| format!("no Int32 column {name}"))
 }
 
-/// Upper block bounds recorded by clamp files, by `vid`: versions closed
-/// after the chunk holding them was written.
-pub(super) fn clamps(dir: &Path, table: &DumpTable) -> Result<HashMap<i64, i32>> {
-    let mut clamps = HashMap::new();
-    for clamp in &table.clamps {
-        check_relative(&clamp.file)?;
-        for batch in batches(&dir.join(&clamp.file))? {
-            let batch = batch?;
-            let vids = batch
-                .column_by_name("vid")
-                .and_then(|c| c.as_primitive_opt::<Int64Type>())
-                .context("clamp file has no Int64 vid")?;
-            let ends = int32(&batch, "block_range_end")?;
-            for i in 0..batch.num_rows() {
-                clamps.insert(vids.value(i), ends.value(i));
+pub(super) fn vids<'a>(
+    batch: &'a RecordBatch,
+    file: &str,
+) -> Result<&'a PrimitiveArray<Int64Type>> {
+    batch
+        .column_by_name("vid")
+        .and_then(|c| c.as_primitive_opt::<Int64Type>())
+        .with_context(|| format!("{file} has no Int64 vid"))
+}
+
+/// Refuses a `vid` that does not follow the last one. graph-node writes
+/// chunks and clamps in `vid` order, and the clamp join depends on it.
+#[derive(Default)]
+pub(super) struct VidOrder(Option<i64>);
+
+impl VidOrder {
+    pub(super) fn check(&mut self, vid: i64, file: &str) -> Result<()> {
+        if self.0.is_some_and(|last| vid <= last) {
+            bail!("{file} is not in vid order at vid {vid}");
+        }
+        self.0 = Some(vid);
+        Ok(())
+    }
+}
+
+struct ClampFile {
+    file: String,
+    batches: Box<dyn Iterator<Item = Result<RecordBatch>>>,
+    batch: Option<RecordBatch>,
+    index: usize,
+    order: VidOrder,
+}
+
+impl ClampFile {
+    fn peek(&mut self) -> Result<Option<(i64, i32)>> {
+        loop {
+            if let Some(batch) = &self.batch
+                && self.index < batch.num_rows()
+            {
+                let vid = vids(batch, &self.file)?.value(self.index);
+                return Ok(Some((
+                    vid,
+                    int32(batch, "block_range_end")?.value(self.index),
+                )));
+            }
+            self.index = 0;
+            self.batch = self.batches.next().transpose()?;
+            if self.batch.is_none() {
+                return Ok(None);
             }
         }
     }
-    Ok(clamps)
+
+    fn advance(&mut self, vid: i64) -> Result<()> {
+        self.order.check(vid, &self.file)?;
+        self.index += 1;
+        Ok(())
+    }
+}
+
+/// Upper block bounds recorded by clamp files: versions closed after the
+/// chunk holding them was written. Read alongside the chunks, in `vid`
+/// order, so only a batch per clamp file is held.
+pub(super) struct Clamps(Vec<ClampFile>);
+
+impl Clamps {
+    pub(super) fn open(dir: &Path, table: &DumpTable) -> Result<Self> {
+        let mut files = Vec::new();
+        for clamp in &table.clamps {
+            check_relative(&clamp.file)?;
+            files.push(ClampFile {
+                file: clamp.file.clone(),
+                batches: Box::new(batches(&dir.join(&clamp.file))?),
+                batch: None,
+                index: 0,
+                order: VidOrder::default(),
+            });
+        }
+        Ok(Clamps(files))
+    }
+
+    /// The clamp for `vid`, if any. Must be asked in ascending `vid` order.
+    pub(super) fn end(&mut self, vid: i64) -> Result<Option<i32>> {
+        let mut end = None;
+        // A later clamp file, from a later dump, overrides an earlier one.
+        for file in &mut self.0 {
+            while let Some((clamped, at)) = file.peek()?
+                && clamped <= vid
+            {
+                file.advance(clamped)?;
+                if clamped == vid {
+                    end = Some(at);
+                }
+            }
+        }
+        Ok(end)
+    }
 }
 
 /// Call `f` for every version in a table as it stood at block `cut`:
@@ -111,17 +185,15 @@ fn visit(
     shape: &mut Option<Shape>,
     mut f: impl FnMut(Row) -> Result<()>,
 ) -> Result<()> {
-    let clamps = clamps(dir, table)?;
+    let mut clamps = Clamps::open(dir, table)?;
+    let mut order = VidOrder::default();
 
     for chunk in &table.chunks {
         check_relative(&chunk.file)?;
         for batch in batches(&dir.join(&chunk.file))? {
             let batch = batch?;
             let schema = batch.schema();
-            let vids = batch
-                .column_by_name("vid")
-                .and_then(|c| c.as_primitive_opt::<Int64Type>())
-                .with_context(|| format!("{} has no Int64 vid", chunk.file))?;
+            let vids = vids(&batch, &chunk.file)?;
             let starts = match schema.column_with_name("block$") {
                 Some(_) => int32(&batch, "block$")?,
                 None => int32(&batch, "block_range_start")?,
@@ -155,13 +227,14 @@ fn visit(
             let rows = RowConverter::new(fields)?.convert_columns(&columns)?;
 
             for index in 0..batch.num_rows() {
+                let vid = vids.value(index);
+                order.check(vid, &chunk.file)?;
+                let clamp = clamps.end(vid)?;
                 let start = starts.value(index);
                 if start > cut {
                     continue;
                 }
-                let end = clamps
-                    .get(&vids.value(index))
-                    .copied()
+                let end = clamp
                     .or_else(|| ends.and_then(|e| e.is_valid(index).then(|| e.value(index))))
                     .filter(|end| *end <= cut);
                 f(Row {
@@ -177,25 +250,63 @@ fn visit(
     Ok(())
 }
 
+/// A version as sorted on disk: key, start, end. Byte order is the order of
+/// (key, end), with an open version before any closed one.
+const RECORD: usize = 44;
+
+fn record(row: &Row) -> [u8; RECORD] {
+    let mut out = [0; RECORD];
+    out[..32].copy_from_slice(&row.key);
+    out[32..36].copy_from_slice(&row.start.to_be_bytes());
+    let end = row
+        .end
+        .map_or(0, |end| i64::from(end) - i64::from(i32::MIN) + 1);
+    out[36..].copy_from_slice(&end.to_be_bytes());
+    out
+}
+
+struct Version {
+    key: Key,
+    start: i32,
+    /// More than one only if the dump holds the same version twice.
+    ends: Vec<Option<i32>>,
+}
+
+/// A table's versions as of `cut`, in key order, from a sort that spills to
+/// disk past `memory` bytes.
 fn load(
     dir: &Path,
     table: &DumpTable,
     cut: i32,
     shape: &mut Option<Shape>,
-) -> Result<HashMap<Key, Version>> {
-    let mut versions: HashMap<Key, Version> = HashMap::new();
-    visit(dir, table, cut, shape, |row| {
-        let version = versions.entry(row.key).or_insert(Version {
-            start: row.start,
-            ends: Vec::new(),
-        });
-        version.ends.push(row.end);
-        Ok(())
-    })?;
-    for version in versions.values_mut() {
-        version.ends.sort();
-    }
-    Ok(versions)
+    memory: usize,
+) -> Result<impl Iterator<Item = Result<Version>> + use<>> {
+    let mut sorter = Sorter::<RECORD>::new(memory);
+    visit(dir, table, cut, shape, |row| sorter.push(record(&row)))?;
+    let mut records = sorter.finish()?.peekable();
+
+    Ok(std::iter::from_fn(move || {
+        let first = match records.next()? {
+            Ok(first) => first,
+            Err(e) => return Some(Err(e)),
+        };
+        let decode = |r: &[u8; RECORD]| {
+            let end = i64::from_be_bytes(r[36..].try_into().unwrap());
+            (end != 0).then(|| (end - 1 + i64::from(i32::MIN)) as i32)
+        };
+        let mut version = Version {
+            key: first[..32].try_into().unwrap(),
+            start: i32::from_be_bytes(first[32..36].try_into().unwrap()),
+            ends: vec![decode(&first)],
+        };
+        while let Some(Ok(next)) = records.peek()
+            && next[..32] == version.key
+        {
+            version.ends.push(decode(next));
+            records.next();
+        }
+        Some(Ok(version))
+    }))
 }
 
 fn describe(row: &Row) -> Result<String> {
@@ -260,6 +371,10 @@ pub struct State {
 
 /// Hash a dump's entity versions as they stood at `at` (default: its head).
 pub fn state(dir: &Path, at: Option<i32>) -> Result<State> {
+    state_in(dir, at, sort::MEMORY)
+}
+
+fn state_in(dir: &Path, at: Option<i32>, memory: usize) -> Result<State> {
     let metadata = read_metadata(dir)?;
     let Some(head) = metadata.head_block.as_ref().map(|h| h.number) else {
         bail!("a dump without a head block has no state");
@@ -283,7 +398,7 @@ pub fn state(dir: &Path, at: Option<i32>) -> Result<State> {
     let mut tables = Vec::new();
     for (name, table) in &metadata.tables {
         let mut shape = None;
-        let mut leaves: Vec<Key> = Vec::new();
+        let mut leaves = Sorter::<32>::new(memory);
         visit(dir, table, block, &mut shape, |row| {
             let mut leaf = Sha256::new();
             leaf.update(row.key);
@@ -291,24 +406,24 @@ pub fn state(dir: &Path, at: Option<i32>) -> Result<State> {
                 Some(end) => leaf.update(end.to_be_bytes()),
                 None => leaf.update(b"open"),
             }
-            leaves.push(leaf.finalize().into());
-            Ok(())
+            leaves.push(leaf.finalize().into())
         })
         .with_context(|| format!("reading {name}"))?;
-        leaves.sort_unstable();
 
         let mut hasher = Sha256::new();
         for (column, data_type) in shape.iter().flatten() {
             hasher.update(format!("{column}:{data_type}\0"));
         }
-        for leaf in &leaves {
-            hasher.update(leaf);
+        let mut versions = 0;
+        for leaf in leaves.finish()? {
+            hasher.update(leaf?);
+            versions += 1;
         }
         let root = hex::encode(hasher.finalize());
         all.update(format!("\0{name}\0{root}"));
         tables.push(TableState {
             table: name.clone(),
-            versions: leaves.len(),
+            versions,
             root,
         });
     }
@@ -324,9 +439,11 @@ pub fn state(dir: &Path, at: Option<i32>) -> Result<State> {
 /// Compare two dumps of one deployment, version by version, as both stood
 /// at `at` (default: the lower of the two heads).
 ///
-/// Holds a 32-byte key per version in memory, for both sides of one table
-/// at a time.
 pub fn diff(a: &Path, b: &Path, at: Option<i32>) -> Result<Diff> {
+    diff_in(a, b, at, sort::MEMORY)
+}
+
+fn diff_in(a: &Path, b: &Path, at: Option<i32>, memory: usize) -> Result<Diff> {
     let (meta_a, meta_b) = (read_metadata(a)?, read_metadata(b)?);
     if meta_a.deployment != meta_b.deployment {
         bail!(
@@ -361,57 +478,84 @@ pub fn diff(a: &Path, b: &Path, at: Option<i32>) -> Result<Diff> {
     for (name, table_a) in &meta_a.tables {
         let table_b = &meta_b.tables[name];
         let mut shape = None;
-        let versions_a =
-            load(a, table_a, block, &mut shape).with_context(|| format!("reading {name} in A"))?;
-        let versions_b =
-            load(b, table_b, block, &mut shape).with_context(|| format!("reading {name} in B"))?;
+        let mut versions_a = load(a, table_a, block, &mut shape, memory)
+            .with_context(|| format!("reading {name} in A"))?;
+        let mut versions_b = load(b, table_b, block, &mut shape, memory)
+            .with_context(|| format!("reading {name} in B"))?;
 
         let mut table = TableDiff {
             table: name.clone(),
-            versions: [versions_a.len(), versions_b.len()],
+            versions: [0, 0],
             only: [0, 0],
             closed_differently: 0,
             first_block: None,
             samples: Vec::new(),
         };
-        // (block, key, in A, in B) for every version that differs
-        let mut differing = Vec::new();
-        for (key, version) in &versions_a {
-            match versions_b.get(key) {
-                None => {
-                    table.only[0] += 1;
-                    differing.push((version.start, *key, true, false));
-                }
-                Some(other) if other.ends != version.ends => {
-                    table.closed_differently += 1;
-                    let ends = version.ends.iter().chain(&other.ends);
-                    let block = ends.flatten().min().copied().unwrap_or(version.start);
-                    differing.push((block, *key, true, true));
-                }
-                Some(_) => {}
+        // A few keys from each side that differ at `first_block`.
+        let mut first: [Vec<Key>; 2] = Default::default();
+        let mut differs = |table: &mut TableDiff, block: i32, key: Key, sides: [bool; 2]| {
+            if table.first_block.is_none_or(|first| block < first) {
+                table.first_block = Some(block);
+                first = Default::default();
             }
-        }
-        for (key, version) in &versions_b {
-            if !versions_a.contains_key(key) {
-                table.only[1] += 1;
-                differing.push((version.start, *key, false, true));
+            if table.first_block == Some(block) {
+                for (keys, side) in first.iter_mut().zip(sides) {
+                    if side && keys.len() < SAMPLES {
+                        keys.push(key);
+                    }
+                }
+            }
+        };
+
+        let (mut next_a, mut next_b) = (
+            versions_a.next().transpose()?,
+            versions_b.next().transpose()?,
+        );
+        loop {
+            let order = match (&next_a, &next_b) {
+                (None, None) => break,
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (Some(va), Some(vb)) => va.key.cmp(&vb.key),
+            };
+            match order {
+                Ordering::Less => {
+                    let va = next_a.take().unwrap();
+                    table.versions[0] += 1;
+                    table.only[0] += 1;
+                    differs(&mut table, va.start, va.key, [true, false]);
+                }
+                Ordering::Greater => {
+                    let vb = next_b.take().unwrap();
+                    table.versions[1] += 1;
+                    table.only[1] += 1;
+                    differs(&mut table, vb.start, vb.key, [false, true]);
+                }
+                Ordering::Equal => {
+                    let (va, vb) = (next_a.take().unwrap(), next_b.take().unwrap());
+                    table.versions[0] += 1;
+                    table.versions[1] += 1;
+                    if va.ends != vb.ends {
+                        table.closed_differently += 1;
+                        let ends = va.ends.iter().chain(&vb.ends);
+                        let block = ends.flatten().min().copied().unwrap_or(va.start);
+                        differs(&mut table, block, va.key, [true, true]);
+                    }
+                }
+            }
+            if next_a.is_none() {
+                next_a = versions_a.next().transpose()?;
+            }
+            if next_b.is_none() {
+                next_b = versions_b.next().transpose()?;
             }
         }
 
-        table.first_block = differing.iter().map(|d| d.0).min();
-        if let Some(first) = table.first_block {
-            let at_first = |in_side: fn(&(i32, Key, bool, bool)) -> bool| -> HashSet<Key> {
-                differing
-                    .iter()
-                    .filter(|d| d.0 == first && in_side(d))
-                    .map(|d| d.1)
-                    .collect()
-            };
-            table.samples = samples("A", a, table_a, block, &at_first(|d| d.2))?;
-            table
-                .samples
-                .extend(samples("B", b, table_b, block, &at_first(|d| d.3))?);
-        }
+        let [keys_a, keys_b] = first.map(HashSet::from_iter);
+        table.samples = samples("A", a, table_a, block, &keys_a)?;
+        table
+            .samples
+            .extend(samples("B", b, table_b, block, &keys_b)?);
         tables.push(table);
     }
 
@@ -642,6 +786,64 @@ pub(crate) mod tests {
             state(short.path(), None).unwrap()
         );
         assert!(state(long.path(), Some(101)).is_err());
+    }
+
+    #[test]
+    fn spilling_to_disk_changes_nothing() {
+        let a = dump(100, &BASE, &[]);
+        let mut rows = BASE.to_vec();
+        rows[2].4 = 8;
+        rows.push((4, 64, None, "c", 0));
+        rows.push((5, 64, None, "c", 0));
+        let b = dump(100, &rows, &[(1, 50)]);
+        for dir in [&a, &b] {
+            assert_eq!(
+                state_in(dir.path(), None, 1).unwrap(),
+                state(dir.path(), None).unwrap()
+            );
+        }
+        let spilled = diff_in(a.path(), b.path(), None, 1).unwrap();
+        assert_eq!(spilled, diff(a.path(), b.path(), None).unwrap());
+        assert_eq!(spilled.tables[0].only, [1, 2]);
+    }
+
+    #[test]
+    fn a_later_clamp_file_overrides_an_earlier_one() {
+        let mut open = BASE;
+        open[0].2 = None;
+        let a = dump(100, &open, &[(1, 40)]);
+        write(
+            &a.path().join("Token/clamp_000001.parquet"),
+            Schema::new(vec![
+                Field::new("vid", DataType::Int64, false),
+                Field::new("block_range_end", DataType::Int32, false),
+            ]),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(Int32Array::from(vec![50])),
+            ],
+        );
+        let path = a.path().join("metadata.json");
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        metadata["tables"]["Token"]["clamps"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "file": "Token/clamp_000001.parquet" }));
+        fs::write(&path, metadata.to_string()).unwrap();
+
+        let b = dump(100, &BASE, &[]);
+        assert_eq!(
+            state(a.path(), None).unwrap(),
+            state(b.path(), None).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_chunk_out_of_vid_order_is_refused() {
+        let rows = [(2, 10, None, "a", 1), (1, 20, None, "b", 7)];
+        let err = state(dump(100, &rows, &[]).path(), None).unwrap_err();
+        assert!(format!("{err:#}").contains("not in vid order"), "{err:#}");
     }
 
     #[test]

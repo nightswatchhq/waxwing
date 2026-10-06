@@ -11,7 +11,7 @@ use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use serde_json::json;
 
-use super::diff::{batches, clamps, int32};
+use super::diff::{Clamps, VidOrder, batches, int32, vids};
 use super::{
     BlockPtr, CATALOGUE_FILE, Chain, DumpTable, Layer, check_relative, read_catalogue,
     read_metadata, reverted_layers,
@@ -109,7 +109,8 @@ struct TableCut {
 }
 
 fn cut_table(src: &Path, dst: &Path, name: &str, table: &DumpTable, cut: i32) -> Result<TableCut> {
-    let clamps = clamps(src, table)?;
+    let mut clamps = Clamps::open(src, table)?;
+    let mut order = VidOrder::default();
     let mut out = TableCut {
         max_vid: -1,
         ..Default::default()
@@ -121,10 +122,12 @@ fn cut_table(src: &Path, dst: &Path, name: &str, table: &DumpTable, cut: i32) ->
         for batch in batches(&src.join(&chunk.file))? {
             let batch = batch?;
             let schema = batch.schema();
-            let vids = batch
-                .column_by_name("vid")
-                .and_then(|c| c.as_primitive_opt::<Int64Type>())
-                .with_context(|| format!("{} has no Int64 vid", chunk.file))?;
+            let vids = vids(&batch, &chunk.file)?;
+            let mut batch_clamps = Vec::with_capacity(batch.num_rows());
+            for &vid in vids.values() {
+                order.check(vid, &chunk.file)?;
+                batch_clamps.push(clamps.end(vid)?);
+            }
             let starts = match schema.column_with_name("block$") {
                 Some(_) => int32(&batch, "block$")?,
                 None => int32(&batch, "block_range_start")?,
@@ -138,10 +141,8 @@ fn cut_table(src: &Path, dst: &Path, name: &str, table: &DumpTable, cut: i32) ->
                 let ends = int32(&batch, "block_range_end")?;
                 let cut_ends: Int32Array = (0..batch.num_rows())
                     .map(|i| {
-                        let end = clamps
-                            .get(&vids.value(i))
-                            .copied()
-                            .or_else(|| ends.is_valid(i).then(|| ends.value(i)));
+                        let end =
+                            batch_clamps[i].or_else(|| ends.is_valid(i).then(|| ends.value(i)));
                         if keep.value(i) && end.is_some_and(|end| end > cut) {
                             out.reopened += 1;
                         }
