@@ -64,14 +64,14 @@ entities() {
 # dump [node] [directory under work/dumps]; prints the head it was taken at.
 dump() {
   local node=${1:-a} name=${2:-rig}
-  docker compose exec -T graph-node-$node graphman --config /config/$node.toml dump "$DEPLOYMENT" /dumps/$name >/dev/null
+  docker compose exec -T graph-node-$node graphman --config /config/$node${CONFIG_SUFFIX:-}.toml dump "$DEPLOYMENT" /dumps/$name >/dev/null
   jq .head_block.number work/dumps/$name/metadata.json
 }
 
 # restore [directory under work/dumps] into B.
 restore() {
-  docker compose exec -T graph-node-b graphman --config /config/b.toml create $NAME >/dev/null
-  docker compose exec -T graph-node-b graphman --config /config/b.toml restore /dumps/${1:-rig} --name $NAME >/dev/null
+  docker compose exec -T graph-node-b graphman --config /config/b${CONFIG_SUFFIX:-}.toml create $NAME >/dev/null
+  docker compose exec -T graph-node-b graphman --config /config/b${CONFIG_SUFFIX:-}.toml restore /dumps/${1:-rig} --name $NAME >/dev/null
   docker compose restart graph-node-b >/dev/null 2>&1
   wait_http $B_INDEX
 }
@@ -89,7 +89,7 @@ stack_up() {
 
 # deploy <admin url> <index url>: hand the subgraph to a node to index itself.
 deploy() {
-  (cd subgraph && graph create --node "$1" $NAME >/dev/null 2>&1 &&
+  (cd ${SUBGRAPH:-subgraph} && graph create --node "$1" $NAME >/dev/null 2>&1 &&
     graph deploy $NAME --node "$1" --ipfs http://localhost:15001 --version-label v1 >/dev/null 2>&1)
   DEPLOYMENT=$(gql "$2/graphql" '{ indexingStatuses { subgraph } }' | jq -r '.data.indexingStatuses[0].subgraph')
 }

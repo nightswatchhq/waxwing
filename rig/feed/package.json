@@ -1,0 +1,7 @@
+{
+  "name": "waxwing-rig-feed",
+  "private": true,
+  "dependencies": {
+    "@graphprotocol/graph-ts": "^0.38.0"
+  }
+}

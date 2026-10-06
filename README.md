@@ -101,6 +101,24 @@ mention: `graphman create <name>` on the receiver before `restore --name`,
 and the receiver must be able to fetch the manifest and WASM from IPFS, since
 the dump carries neither.
 
+`rig/arbitrum.sh` is the same handoff on a real chain, from the public RPC:
+a very small subgraph over Chainlink's ETH / USD answers on Arbitrum One
+(`rig/feed`), bounded by `startBlock` and `endBlock` to four finalized
+hours. A syncs it; the dump is sealed against Arbitrum One and cut back to
+the middle of the window, `verify --require-final` passes, and `waxwing
+restore` puts the cut into B on stock v0.45.0. B indexes the second half by
+itself. On 2026-10-06 A synced 60,000 blocks in 252 s; the cut restored in
+0.8 s; POIs and entities agreed at the cut (28 answers) and at the end (70),
+`diff` found the two nodes' dumps identical, and B's attestation at the cut
+agreed with A's sealed cut.
+
+A first attempt used Graph Horizon's own staking events, and graph-node
+was OOM-killed at 15 GB, twice, on a window it should have held in 200 MB.
+Indexer agents batch: one transaction there carries 600 logs, 50 of them
+the subgraph's triggers, and graph-node v0.45 runs out of memory on a run
+of such transactions whether or not it batches writes. Not waxwing's to
+fix, but worth knowing before syncing anything agents touch.
+
 `rig/reorg.sh` puts a reorg between the full dump and the incremental one.
 graphman accepts it, because the head number advanced, and the restored copy
 is corrupt: an entity from the reverted fork, two live versions of one entity,
@@ -336,6 +354,5 @@ complain about in graphman. What remains of it:
 1. Finding attestations: an index of them by deployment, such as a
    subgraph over an event a publisher emits.
 
-And the experiments still owed: nested data sources (for `parent`), real
-deployments on a real network, restore time per TB, pruning between dumps, a
-grafted deployment.
+And the experiments still owed, small and local: pruning between dumps, a
+grafted deployment, nested data sources (for `parent`).

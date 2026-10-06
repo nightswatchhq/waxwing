@@ -5,3 +5,6 @@ subgraph/node_modules/
 subgraph/generated/
 subgraph/build/
 subgraph/abis/
+feed/generated/
+feed/build/
+feed/node_modules/

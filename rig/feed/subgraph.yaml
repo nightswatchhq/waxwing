@@ -1,0 +1,27 @@
+specVersion: 1.2.0
+schema:
+  file: ./schema.graphql
+dataSources:
+  - kind: ethereum
+    name: EthUsd
+    network: arbitrum-one
+    source:
+      # Chainlink ETH / USD on Arbitrum One: the aggregator behind proxy
+      # 0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612.
+      address: "0xD827123D014578C965F6c9d87A641ec05FaA5501"
+      abi: Aggregator
+      # About four hours, all finalized on 2026-10-06: some seventy answers.
+      startBlock: 512161262
+      endBlock: 512221262
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities: [Feed, Round]
+      abis:
+        - name: Aggregator
+          file: ./abis/Aggregator.json
+      eventHandlers:
+        - event: AnswerUpdated(indexed int256,indexed uint256,uint256)
+          handler: handleAnswerUpdated
+      file: ./src/mapping.ts

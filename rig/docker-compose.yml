@@ -19,6 +19,7 @@ x-graph-node: &graph-node
     ETHEREUM_POLLING_INTERVAL: 500
     # The rig subgraph has a fulltext search, which graph-node otherwise refuses.
     GRAPH_ALLOW_NON_DETERMINISTIC_FULLTEXT_SEARCH: "true"
+    GRAPH_STORE_WRITE_BATCH_DURATION: ${GRAPH_STORE_WRITE_BATCH_DURATION:-300}
 
 services:
   anvil:
@@ -41,7 +42,7 @@ services:
     ports: ["18000:8000", "18020:8020", "18030:8030"]
     environment:
       <<: *graph-node-env
-      GRAPH_NODE_CONFIG: /config/a.toml
+      GRAPH_NODE_CONFIG: /config/a${CONFIG_SUFFIX:-}.toml
     volumes: ["./config:/config:ro", "./work/dumps:/dumps"]
   # The receiver. Never told about the subgraph except through restore.
   graph-node-b:
@@ -50,5 +51,5 @@ services:
     ports: ["28000:8000", "28020:8020", "28030:8030"]
     environment:
       <<: *graph-node-env
-      GRAPH_NODE_CONFIG: /config/b.toml
+      GRAPH_NODE_CONFIG: /config/b${CONFIG_SUFFIX:-}.toml
     volumes: ["./config:/config:ro", "./work/dumps:/dumps"]

@@ -1,0 +1,15 @@
+type Feed @entity(immutable: false) {
+  id: Bytes!
+  answer: BigInt!
+  rounds: Int!
+  updatedAt: BigInt!
+}
+
+type Round @entity(immutable: true) {
+  id: Bytes!
+  feed: Feed!
+  roundId: BigInt!
+  answer: BigInt!
+  updatedAt: BigInt!
+  block: BigInt!
+}
