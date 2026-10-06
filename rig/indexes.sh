@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Does a restore keep the source's indexes? Drop an attribute index on A and
 # add one by hand, dump, restore into B, and compare the two index sets.
-# Stock graphman rebuilds the defaults; GRAPH_NODE_IMAGE picks another build.
+# Stock graphman rebuilds the defaults, and `waxwing indexes` puts the
+# dump's set back. GRAPH_NODE_IMAGE picks another graph-node build.
 set -euo pipefail
 cd "$(dirname "$0")"
 . ./lib.sh
@@ -22,6 +23,8 @@ F=$(dump)
 echo "dump at block $F"
 
 restore
+echo "after graphman restore: $(diff <(indexes a) <(indexes b) | grep -c '^[<>]') index(es) differ"
+waxwing indexes $DUMP --db postgresql://graph-node:let-me-in@localhost:25432/graph-node --apply
 if diff <(indexes a) <(indexes b); then echo "ok        index set"; else
   echo "MISMATCH  index set (< A, > B)"; fail=1
 fi

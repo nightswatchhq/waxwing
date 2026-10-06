@@ -26,8 +26,12 @@ services:
   ipfs:
     image: ipfs/kubo:v0.39.0
     ports: ["15001:5001"]
-  postgres-a: *postgres
-  postgres-b: *postgres
+  postgres-a:
+    <<: *postgres
+    ports: ["15432:5432"]
+  postgres-b:
+    <<: *postgres
+    ports: ["25432:5432"]
   # The publisher.
   graph-node-a:
     <<: *graph-node

@@ -4,8 +4,8 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use waxwing::{
-    Attestation, Chain, CutAt, RpcChain, SealOptions, attest, cut, cut_block, diff, is_final,
-    read_catalogue, seal, state, tally, verify,
+    Attestation, Chain, CutAt, RpcChain, SealOptions, apply_indexes, attest, cut, cut_block, diff,
+    index_plan, is_final, read_catalogue, seal, state, tally, verify,
 };
 
 #[derive(Parser)]
@@ -30,7 +30,7 @@ enum Command {
         /// fork this chain has reverted
         #[arg(long)]
         rpc: Option<String>,
-        /// Do not record the state root, which reads every row into memory
+        /// Do not record the state root, which reads every row
         #[arg(long)]
         no_state: bool,
     },
@@ -94,6 +94,23 @@ enum Command {
         /// the source was sealed at
         #[arg(long)]
         rpc: Option<String>,
+    },
+    /// Give the deployment restored from a dump the indexes the dump
+    /// recorded, not graphman's defaults. Prints the plan; changes nothing
+    /// without --apply
+    Indexes {
+        dir: PathBuf,
+        /// The receiving database, as postgresql://user:password@host/db
+        #[arg(long)]
+        db: String,
+        /// The deployment's namespace (sgdN), where the database has several
+        /// copies
+        #[arg(long)]
+        namespace: Option<String>,
+        /// Build and drop indexes, concurrently, then stop graph-node adding
+        /// postponed ones back
+        #[arg(long)]
+        apply: bool,
     },
     /// Hash a dump's entity versions as of a block, independent of vid,
     /// row order and encoding: what two indexers should agree on
@@ -260,6 +277,31 @@ fn main() -> Result<ExitCode> {
                 "state {} at block {}: {}",
                 state.deployment, state.block, state.root
             );
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Indexes {
+            dir,
+            db,
+            namespace,
+            apply,
+        } => {
+            let mut db = postgres::Client::connect(&db, postgres::NoTls)
+                .context("connecting to the database")?;
+            let plan = index_plan(&dir, &mut db, namespace.as_deref())?;
+            println!(
+                "{}: {} to build, {} to drop",
+                plan.namespace,
+                plan.create.len(),
+                plan.drop.len()
+            );
+            if !apply {
+                for sql in plan.create.iter().chain(&plan.drop) {
+                    println!("{sql};");
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            apply_indexes(&plan, &mut db, |sql| println!("{sql};"))?;
+            println!("done");
             Ok(ExitCode::SUCCESS)
         }
         Command::Diff { a, b, at } => {

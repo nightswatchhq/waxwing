@@ -12,8 +12,10 @@ mod attest;
 mod cut;
 pub use attest::{Attestation, attest, statement, tally};
 mod diff;
+mod indexes;
 pub use cut::{Cut, CutAt, cut, cut_block, dump_head};
 pub use diff::{Diff, State, TableDiff, TableState, diff, state};
+pub use indexes::{IndexPlan, apply as apply_indexes, index_plan};
 mod sort;
 
 pub const CATALOGUE_FILE: &str = "catalogue.json";
@@ -35,6 +37,9 @@ struct DumpMetadata {
     head_block: Option<BlockPtr>,
     graft_base: Option<String>,
     graft_block: Option<BlockPtr>,
+    /// `create index` statements by table, in namespace `sgd`.
+    #[serde(default)]
+    indexes: BTreeMap<String, Vec<String>>,
     tables: BTreeMap<String, DumpTable>,
 }
 
