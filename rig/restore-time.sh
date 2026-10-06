@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # How long does building indexes during the import cost? Pad A's tables
 # with ROWS synthetic rows by SQL, dump once, and time graphman restore into
-# a fresh B on stock graph-node and on PATCHED, a build that creates the
-# tables bare and indexes after the import.
+# a fresh B on stock graph-node, on PATCHED, a build that creates the
+# tables bare and indexes after the import, and with waxwing restore.
 set -euo pipefail
 cd "$(dirname "$0")"
 . ./lib.sh
@@ -32,3 +32,14 @@ timed_restore() {
 }
 timed_restore graphprotocol/graph-node:v0.45.0
 timed_restore $PATCHED
+
+docker compose rm -sfv graph-node-b postgres-b >/dev/null 2>&1
+docker compose up -d graph-node-b >/dev/null 2>&1
+wait_http $B_INDEX
+docker compose exec -T graph-node-b graphman --config /config/b.toml create $NAME >/dev/null
+rm -rf work/dumps/waxwing
+start=$SECONDS
+waxwing restore $DUMP --db postgresql://graph-node:let-me-in@localhost:25432/graph-node \
+  --config config/b.toml --graphman "docker compose exec -T graph-node-b graphman" \
+  --work work/dumps/waxwing --work-as /dumps/waxwing --name $NAME --node default >/dev/null
+echo "waxwing restore on stock v0.45.0: took $((SECONDS - start))s"

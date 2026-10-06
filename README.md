@@ -24,6 +24,9 @@ waxwing state <dump-dir> [--at BLOCK]
 waxwing cut <src-dump-dir> <dst-dir> --at BLOCK|final [--rpc URL]
 waxwing attest <own-dump-dir> --key-file FILE [--at BLOCK|final] [--rpc URL]
 waxwing attested <dump-dir> <attestation.json>... [--signer 0x…]... [--threshold K]
+waxwing indexes <dump-dir> --db URL [--namespace sgdN] [--apply]
+waxwing restore <dump-dir> --db URL --config graphman.toml --work DIR --name NAME --node NODE
+                [--graphman CMD] [--work-as PATH] [--shard SHARD] [--primary-db URL]
 ```
 
 `seal` reads the dump's `metadata.json`, hashes every file it references
@@ -231,29 +234,63 @@ stock graph-node. It compares the restored deployment's indexes with the
 dump's list and prints the statements; with `--apply` it builds what is
 missing, drops the surplus, both `concurrently`, and sets
 `postponed_indexes_created` so graph-node does not add postponed ones back.
-It never drops an index backing a constraint. A BRIN index it has to build
-gets the plain operator class, since the dump does not record
-`minmax_multi_ops`. `rig/indexes.sh` drops an attribute index on A, adds one
-by hand, restores into B with stock v0.45.0, and runs it: the two index
-sets then match, and POIs and entities agree after B indexes on.
+It never drops an index backing a constraint, and gives BRIN indexes the
+`minmax_multi_ops` operator classes where the server has them, as graph-node
+does; the dump does not record them. `rig/indexes.sh` drops an attribute
+index on A, adds one by hand, restores into B with stock v0.45.0, and runs
+it: the two index sets then match, and POIs and entities agree after B
+indexes on.
 
-The second half, the import time, is not fixable from outside graphman.
-graph-node branch `pete/restore-dump-indexes` (on cargopete/graph-node,
-against `6838f4e3c`) creates the tables bare and builds the dump's indexes
-after the import; it is kept as a measurement, not proposed upstream.
+## Restore
+
+The import time is the other half, and graphman cannot be told to build
+indexes later. graph-node branch `pete/restore-dump-indexes` (on
+cargopete/graph-node, against `6838f4e3c`) shows what it is worth: it
+creates the tables bare and builds the dump's indexes after the import, and
+is kept as a measurement, not proposed upstream.
+
+`waxwing restore` gets the same with a stock graph-node:
+
+1. graphman restores a skeleton: the dump's metadata with no rows and no
+   head, so graphman still writes all of graph-node's own metadata. It runs
+   under a copy of the operator's config with one rule put first, assigning
+   this subgraph name to a node that does not exist, `waxwing_parked`.
+   waxwing refuses to go on unless the deployment is parked there.
+2. waxwing drops the default indexes on the entity tables, keeping those
+   behind constraints, and loads every chunk with `COPY`, clamp files folded
+   in.
+3. It builds the dump's indexes, runs `analyze`, sets the head where
+   graphman's finalize would have, and marks postponed indexes created.
+4. `graphman reassign` hands the deployment to `--node`.
+
+`--graphman` is how to run graphman (`docker exec -i graph-node graphman`),
+and `--work-as` where graphman sees the work directory, if elsewhere. The
+subgraph name must exist (`graphman create`). Not handled: fulltext fields,
+which graphman computes on import (waxwing refuses such a schema); resuming
+an interrupted restore (drop the parked deployment and start again); and
+graph-node versions that keep the head anywhere but `subgraphs.head`.
+
+`rig/fast-restore.sh` takes a full and an incremental dump of A, with an
+attribute index dropped in between, restores with waxwing into B on stock
+v0.45.0, and lets B index on by itself. The index sets match, POIs and
+entities agree at five blocks, and a final `diff` of the two nodes' dumps
+is identical. B picks the deployment up from the reassignment, with no
+restart.
+
 `rig/restore-time.sh` pads A with 5M versions in each of two tables
-(3.7 GB), dumps, and times restore into a fresh B: 372 s on stock v0.45.0,
-176 s on the patched build. Getting that back without a patched graph-node
-means waxwing doing the import itself.
+(3.7 GB), dumps, and times restore into a fresh B: 369 s with graphman on
+v0.45.0, 156 s with graphman on the patched build, and 140 s with
+`waxwing restore` on v0.45.0. Row counts, a checksum over the pings, the
+head and the index count of A and the waxwing-restored B agree. Two tables
+of one toy schema: a real deployment's wider rows and more indexes may
+move the ratio either way.
 
 ## Next
 
 [docs/graphman-issues.md](docs/graphman-issues.md) is a scan of what operators
 complain about in graphman. What remains of it:
 
-1. Restore time: waxwing doing the import, with indexes built after it.
-   graphman assigns a restored deployment to a node as it finishes, so a
-   copy waxwing is still loading has to be kept from being indexed.
+1. Restore: fulltext fields, and resuming an interrupted load.
 2. Attestations: check a signer is an indexer or its operator on the
    network, and somewhere to publish and find them.
 

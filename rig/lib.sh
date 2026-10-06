@@ -7,7 +7,7 @@ DUMP=work/dumps/rig
 A_QUERY=http://localhost:18000 A_ADMIN=http://localhost:18020 A_INDEX=http://localhost:18030
 B_QUERY=http://localhost:28000 B_ADMIN=http://localhost:28020 B_INDEX=http://localhost:28030
 
-waxwing() { cargo run -q --manifest-path ../Cargo.toml -- "$@"; }
+waxwing() { cargo run -q --release --manifest-path ../Cargo.toml -- "$@"; }
 gql() { curl -sf "$1" -H 'content-type: application/json' -d "$(jq -n --arg q "$2" '{query: $q}')"; }
 send() { cast send --rpc-url $RPC --private-key $KEY "$@" >/dev/null; }
 head_block() { cast block-number --rpc-url $RPC; }
