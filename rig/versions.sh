@@ -9,7 +9,7 @@ while read -r a b; do
   GRAPH_NODE_IMAGE_A=graphprotocol/graph-node:$a GRAPH_NODE_IMAGE_B=graphprotocol/graph-node:$b \
     ./fast-restore.sh > "$log" 2>&1 < /dev/null
   code=$?
-  first=$(grep -E "MISMATCH|FAIL|Error|error:" "$log" | head -1 | cut -c1-200)
+  first=$(grep -E "MISMATCH|DIVERGES|FAIL|Error|error:" "$log" | head -1 | cut -c1-200)
   echo "A $a -> B $b: exit=$code ${first:-all checks ok}" >> work/versions.txt
 done <<'LIST'
 v0.42.1 v0.42.1

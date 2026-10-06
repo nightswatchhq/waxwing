@@ -290,6 +290,13 @@ the two nodes produce the same state root at their head and at an earlier
 block. This is the state commitment the POI is not, and what multi-party
 attestation would sign.
 
+Off-chain data, the entities and data sources of file data sources, is
+left out of `state` and `diff`, as graph-node leaves it out of the POI: each
+node fetches the file from IPFS when it can, so the block it lands at
+differs between honest nodes. The rig saw it happen, a note processed at
+block 112 on one node and later on the other. `cut` and `restore` still
+carry it; it is only not something two nodes can agree on block by block.
+
 `data_sources$.parent` is the one column holding a `vid`, another data
 source's, which would make a state differ between indexers. graph-node at
 `6838f4e3c` never writes it: not when indexing, nested templates included,

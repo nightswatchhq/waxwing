@@ -203,7 +203,7 @@ fn check_no_parents(dir: &Path, name: &str, table: &DumpTable) -> Result<()> {
     Ok(())
 }
 
-/// Call `f` for every version in a table as it stood at block `cut`, from
+/// Call `f` for every on-chain version in a table as it stood at block `cut`, from
 /// block `from` on: clamp files applied, later versions dropped, later
 /// closes undone, and versions closed at or before `from` left out, as
 /// graph-node's pruning to `from` deletes them.
@@ -230,6 +230,10 @@ fn visit(
             };
             let ends = match schema.column_with_name("block_range_end") {
                 Some(_) => Some(int32(&batch, "block_range_end")?),
+                None => None,
+            };
+            let regions = match schema.column_with_name("causality_region") {
+                Some(_) => Some(int32(&batch, "causality_region")?),
                 None => None,
             };
 
@@ -263,7 +267,11 @@ fn visit(
                 let start = starts.value(index);
                 let end =
                     clamp.or_else(|| ends.and_then(|e| e.is_valid(index).then(|| e.value(index))));
-                if start > cut || end.is_some_and(|end| end <= from) {
+                // Off-chain rows, from file data sources, start at whatever
+                // block each node fetched the file; the POI leaves them out
+                // too.
+                let off_chain = regions.is_some_and(|r| r.value(index) != 0);
+                if off_chain || start > cut || end.is_some_and(|end| end <= from) {
                     continue;
                 }
                 let end = end.filter(|end| *end <= cut);
@@ -927,6 +935,51 @@ pub(crate) mod tests {
         assert_eq!((diff.from, diff.first()), (60, None));
         assert_eq!(diff.tables[0].versions, [2, 2]);
         assert!(super::diff(unpruned.path(), fresh.path(), Some(59)).is_err());
+    }
+
+    #[test]
+    fn off_chain_rows_do_not_count() {
+        // (vid, block$, causality_region, id): a note read from a file on
+        // chain 0's behalf, which two nodes fetched at different blocks.
+        let notes = |rows: &[(i64, i32, i32, &str)]| {
+            let dir = dump(100, &BASE, &[]);
+            fs::create_dir(dir.path().join("Note")).unwrap();
+            write(
+                &dir.path().join("Note/chunk_000000.parquet"),
+                Schema::new(vec![
+                    Field::new("vid", DataType::Int64, false),
+                    Field::new("block$", DataType::Int32, false),
+                    Field::new("causality_region", DataType::Int32, false),
+                    Field::new("id", DataType::Utf8, false),
+                ]),
+                vec![
+                    Arc::new(Int64Array::from_iter_values(rows.iter().map(|r| r.0))),
+                    Arc::new(Int32Array::from_iter_values(rows.iter().map(|r| r.1))),
+                    Arc::new(Int32Array::from_iter_values(rows.iter().map(|r| r.2))),
+                    Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.3))),
+                ],
+            );
+            let path = dir.path().join("metadata.json");
+            let mut metadata: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            metadata["tables"]["Note"] =
+                json!({ "chunks": [ { "file": "Note/chunk_000000.parquet" } ] });
+            fs::write(&path, metadata.to_string()).unwrap();
+            dir
+        };
+        let a = notes(&[(1, 40, 0, "on-chain"), (2, 112, 9, "note")]);
+        let b = notes(&[(1, 40, 0, "on-chain"), (2, 115, 9, "note")]);
+        assert_eq!(
+            state(a.path(), None, None).unwrap(),
+            state(b.path(), None, None).unwrap()
+        );
+        assert_eq!(diff(a.path(), b.path(), None).unwrap().first(), None);
+
+        let c = notes(&[(1, 41, 0, "on-chain"), (2, 112, 9, "note")]);
+        assert_eq!(
+            diff(a.path(), c.path(), None).unwrap().first(),
+            Some((40, "Note"))
+        );
     }
 
     #[test]
