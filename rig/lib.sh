@@ -62,6 +62,7 @@ entities() {
     stats(id: \"stats\", block: {number: $2}) { spawned pings }
     childs(first: 1000, orderBy: id, block: {number: $2}) { id pings createdAt }
     pingEvents(first: 1000, orderBy: id, block: {number: $2}) { id child { id } n block }
+    notes(first: 1000, orderBy: id, block: {number: $2}) { id ping text }
   }" | jq -ecS 'if .errors then error(.errors | tostring) else .data end'
 }
 
@@ -89,6 +90,7 @@ stack_up() {
   docker compose up -d >/dev/null 2>&1
   wait_http $A_INDEX; wait_http $B_INDEX
 
+  curl -sf -F file=@subgraph/note.json "$IPFS/api/v0/add?cid-version=0&pin=true" >/dev/null
   forge create --root contracts --rpc-url $RPC --private-key $KEY --broadcast src/Rig.sol:Factory >/dev/null
   [ "$(cast code --rpc-url $RPC $FACTORY)" != 0x ] || { echo "factory not at $FACTORY" >&2; exit 1; }
 }

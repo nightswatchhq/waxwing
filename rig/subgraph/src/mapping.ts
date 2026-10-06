@@ -1,8 +1,11 @@
-import { BigInt } from "@graphprotocol/graph-ts";
+import { BigInt, Bytes, DataSourceContext, dataSource } from "@graphprotocol/graph-ts";
 import { Spawned } from "../generated/Factory/Factory";
 import { Ping } from "../generated/templates/ChildTemplate/Child";
-import { ChildTemplate } from "../generated/templates";
-import { Child, PingEvent, Stats } from "../generated/schema";
+import { ChildTemplate, NoteFile } from "../generated/templates";
+import { Child, Note, PingEvent, Stats } from "../generated/schema";
+
+// note.json, pinned to the rig's IPFS by lib.sh.
+const NOTE = "QmQ6dvd1Ymveuu6xwVu3daavQU2X9ZFAsqfvDt81UsdErk";
 
 function loadStats(): Stats {
   let stats = Stats.load("stats");
@@ -46,4 +49,20 @@ export function handlePing(event: Ping): void {
   let stats = loadStats();
   stats.pings = stats.pings.plus(BigInt.fromI32(1));
   stats.save();
+
+  // Every tenth ping reads the note through a file data source.
+  if (event.params.n.toI32() % 10 == 0) {
+    let context = new DataSourceContext();
+    context.setBigInt("ping", event.params.n);
+    context.setString("child", event.address.toHexString());
+    NoteFile.createWithContext(NOTE, context);
+  }
+}
+
+export function handleNote(content: Bytes): void {
+  let context = dataSource.context();
+  let note = new Note(context.getString("child") + "-" + context.getBigInt("ping").toString());
+  note.ping = context.getBigInt("ping");
+  note.text = content.toString();
+  note.save();
 }

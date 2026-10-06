@@ -1,6 +1,12 @@
 # Real deployments from The Graph network, chosen on 2026-10-06 for coverage
 # of what subgraphs use, and run over a recent finalized window.
-# hash                                            network       features
-QmatH4cd25ymsfCFpgKPRQQ7uCYNgarxanVQ9WCfg4Y7TZ  arbitrum-one  templates, file data sources, fulltext, enums, BigDecimal, interfaces, immutables, declared eth_calls
-QmdP7cQxUnaDyN8ixK9XqbXBuhL9WrkyHinLq2DC9tPsiM  arbitrum-one  aggregations, timeseries, Int8 ids
-QmcPbHmaLmKEZLqy4gLXmAhJUuQnUY3Gq5HLkf4dp8KAhr  arbitrum-one  block handlers
+# hash                                            network       [blocks]  features
+# Fails mid-history in its own mapping (an ABI its token data source lacks); not a waxwing result.
+# QmatH4cd25ymsfCFpgKPRQQ7uCYNgarxanVQ9WCfg4Y7TZ  arbitrum-one  -         templates, file data sources, fulltext, enums, BigDecimal, interfaces, immutables, declared eth_calls
+QmdP7cQxUnaDyN8ixK9XqbXBuhL9WrkyHinLq2DC9tPsiM  arbitrum-one  100000    aggregations, timeseries, Int8 ids
+QmcPbHmaLmKEZLqy4gLXmAhJUuQnUY3Gq5HLkf4dp8KAhr  arbitrum-one  2000      block handlers, every block fetched
+QmcE8RpWtsiN5hkJKdfCXGfTDoTgPEjMbQwnjLPfThT7kZ  mainnet       -         interfaces, immutables, arrays, derived fields
+QmTCRJGmwfif42NzyFjq58pVbqFTpZw3sfsyHqAgGFx69M  mainnet       -         enums, BigDecimal, arrays, timestamps
+QmQmz5kh1f83Re1Zaj9UYrzKmcWqpKf1tNs9K6M9WrvPC8  base          -         templates, BigDecimal, immutables, timestamps
+QmdnnffQ52RERnzozpubPnT6pnuTUjR7dr84hcbJZUcbod  base          -         templates, BigDecimal, immutables, timestamps
+QmeB7YfNvLbM9AnSVeh5JvsfUwm1KVCtUDwaDLh5oxupGh  base          1000      fulltext, templates, interfaces, Bytes ids; busy: 6,017 events in 3,000 blocks

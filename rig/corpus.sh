@@ -12,9 +12,22 @@ export CONFIG_SUFFIX=-corpus
 export ETHEREUM_REORG_THRESHOLD=50
 . ./lib.sh
 HASH=$1 NETWORK=$2
-declare -A CHAIN_RPC=([arbitrum-one]=https://arb1.arbitrum.io/rpc [optimism]=https://mainnet.optimism.io [gnosis]=https://rpc.gnosischain.com)
-declare -A WINDOW=([arbitrum-one]=20000 [optimism]=3000 [gnosis]=1000)
+# Public endpoints, for the host's few calls (finalized block, block hashes).
+declare -A CHAIN_RPC=([arbitrum-one]=https://arb1.arbitrum.io/rpc [mainnet]=https://ethereum-rpc.publicnode.com
+  [base]=https://mainnet.base.org [optimism]=https://mainnet.optimism.io [gnosis]=https://rpc.gnosischain.com)
+declare -A CHAIN_ID=([arbitrum-one]=42161 [mainnet]=1 [base]=8453)
+declare -A WINDOW=([arbitrum-one]=20000 [mainnet]=500 [base]=3000 [optimism]=3000 [gnosis]=1000)
 CHAIN=${CHAIN_RPC[$NETWORK]}
+# The graph-nodes' own provider: GraphOps where there is a key for it.
+NODE_RPC=$CHAIN
+KEY_FILE=$HOME/.config/waxwing/graphops.key
+if [ -f "$KEY_FILE" ] && [ -n "${CHAIN_ID[$NETWORK]:-}" ]; then
+  NODE_RPC="https://rpc.graphops.xyz/v1/evm/${CHAIN_ID[$NETWORK]}/$(cat "$KEY_FILE")"
+  GRAPHOPS_IP=$(curl -s -m 10 -H 'accept: application/dns-json' \
+    'https://cloudflare-dns.com/dns-query?name=rpc.graphops.xyz&type=A' | jq -r '[.Answer[] | select(.type == 1)][0].data')
+  export GRAPHOPS_IP COMPOSE_FILE=docker-compose.yml:docker-compose.graphops.yml
+  export ETHEREUM_POLLING_INTERVAL=3000
+fi
 BLOCKS=${3:-${WINDOW[$NETWORK]}}
 NAME=corpus/$(echo "$HASH" | cut -c1-12 | tr 'A-Z' 'a-z')
 
@@ -54,7 +67,7 @@ MID=$(( (START + END) / 2 ))
 # One chain per run: idle block ingestors only wear out public RPCs' limits.
 for n in a b; do
   sed -e "s|\[chains.test\]|[chains.$NETWORK]|" \
-      -e "s|provider = \[ { label = \"anvil\", url = \"http://anvil:8545\", features = \[\"archive\"\] } \]|provider = [ { label = \"$NETWORK\", url = \"$CHAIN\", features = [\"archive\"] } ]|" \
+      -e "s|provider = \[ { label = \"anvil\", url = \"http://anvil:8545\", features = \[\"archive\"\] } \]|provider = [ { label = \"$NETWORK\", url = \"$NODE_RPC\", features = [\"archive\"] } ]|" \
       config/$n.toml > config/$n-corpus.toml
 done
 
@@ -80,7 +93,7 @@ waxwing seal $DUMP --rpc $CHAIN >/dev/null
 waxwing cut $DUMP work/dumps/cut --at "$MID" --rpc $CHAIN >/dev/null
 waxwing seal work/dumps/cut --rpc $CHAIN >/dev/null
 waxwing verify work/dumps/cut --rpc $CHAIN --require-final >/dev/null
-echo "cut to $MID: $(jq '[.tables[].chunks[].row_count] | add' work/dumps/cut/metadata.json) rows in $(jq '.tables | length' work/dumps/cut/metadata.json) tables"
+echo "cut to $MID: $(jq '[.tables[].chunks[].row_count // 0] | add // 0' work/dumps/cut/metadata.json) rows in $(jq '.tables | length' work/dumps/cut/metadata.json) tables"
 
 docker compose exec -T graph-node-b graphman --config /config/b-corpus.toml create $NAME >/dev/null
 waxwing restore work/dumps/cut --db $B_DB --config config/b-corpus.toml \
@@ -93,6 +106,11 @@ for block in "$MID" "$END"; do
 done
 dump a a >/dev/null
 dump b b >/dev/null
-waxwing diff work/dumps/a work/dumps/b --at "$END" | tail -1
-waxwing diff work/dumps/a work/dumps/b --at "$END" >/dev/null || fail=1
+waxwing diff work/dumps/a work/dumps/b --at "$END" > work/diff.txt || fail=1
+cat work/diff.txt
+versions=$(grep -oE '[0-9]+ versions' work/diff.txt | awk '{s += $1} END {print s + 0}')
+if [ "$versions" -eq 0 ]; then
+  echo "NO DATA: the window holds no entity versions, so nothing was tested"; exit 3
+fi
+echo "compared $versions versions"
 exit $fail

@@ -26,3 +26,10 @@ type PingEvent @entity(immutable: true) {
   n: BigInt!
   block: BigInt!
 }
+
+# From a file data source: off-chain, in its own causality region.
+type Note @entity(immutable: true) {
+  id: ID!
+  ping: BigInt!
+  text: String!
+}

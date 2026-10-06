@@ -42,3 +42,14 @@ templates:
         - event: Ping(uint256)
           handler: handlePing
       file: ./src/mapping.ts
+  - kind: file/ipfs
+    name: NoteFile
+    mapping:
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities: [Note]
+      abis:
+        - name: Child
+          file: ./abis/Child.json
+      handler: handleNote
+      file: ./src/mapping.ts

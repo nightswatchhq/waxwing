@@ -1,0 +1,7 @@
+# Pins GraphOps' RPC host for the graph-nodes, where the host's resolver
+# returns an address that does not answer. corpus.sh sets GRAPHOPS_IP.
+services:
+  graph-node-a:
+    extra_hosts: ["rpc.graphops.xyz:${GRAPHOPS_IP}"]
+  graph-node-b:
+    extra_hosts: ["rpc.graphops.xyz:${GRAPHOPS_IP}"]
