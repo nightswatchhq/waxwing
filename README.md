@@ -74,6 +74,9 @@ Things to know:
   dump it never saw.
 - Already restored with graphman? `waxwing indexes <dump> --db … --apply`
   puts the dump's indexes back.
+- The receiver needs what the subgraph needs from graph-node: an ENS
+  subgraph, for one, needs the ENS rainbow table loaded, or it fails on its
+  first block after the restore.
 
 ## How it was checked, and the notes
 
@@ -186,6 +189,52 @@ Indexer agents batch: one transaction there carries 600 logs, 50 of them
 the subgraph's triggers, and graph-node v0.45 runs out of memory on a run
 of such transactions whether or not it batches writes. Not waxwing's to
 fix, but worth knowing before syncing anything agents touch.
+
+### Real deployments
+
+`rig/corpus.sh HASH NETWORK [BLOCKS]` puts a real deployment from The Graph
+network through the whole handoff. `corpus/prepare.py` fetches its manifest,
+schema, mappings and ABIs from The Graph's IPFS and republishes them to the
+rig's with one change: every data source starts and ends inside a recent
+finalized window, raising `specVersion` to 0.0.9 where older, since
+`endBlock` needs it. A syncs the window; the dump is sealed against the
+chain, cut to the middle and verified final; `waxwing restore` puts the cut
+into B on stock v0.45.0; B indexes the second half; public POIs are
+compared at the cut and the end, and `diff` compares every entity version.
+A run whose window holds no versions counts as no data, not a pass.
+`corpus/run-all.sh` does every deployment in `corpus/deployments.txt`.
+
+The graph-nodes need an RPC that serves receipts and logs; the free public
+ones rate-limit a run like this within the hour. `corpus.sh` uses GraphOps
+where `~/.config/waxwing/graphops.key` holds a key. On 2026-10-06, on the
+ThinkPad:
+
+| Deployment | Chain | What it has | Result |
+|---|---|---|---|
+| `QmdP7c…` | Arbitrum One | aggregations, timeseries, Int8 ids | 1,978 versions identical |
+| `QmcPbH…` | Arbitrum One | block handlers | 15 versions identical |
+| `QmTCRJ…` | Ethereum | enums, BigDecimal, arrays | 288 versions identical |
+| `QmQmz5…` | Base | templates, BigDecimal, immutables | 19,019 versions identical |
+| `Qmdnnf…` | Base | templates, BigDecimal, immutables | 21,290 versions identical |
+| `QmeB7Y…` | Base | a Uniswap v3 fork: fulltext, templates, interfaces, 19 tables | 44 versions identical |
+| `QmatH4…` | Arbitrum One | the network subgraph | fails on A: its mapping calls a contract whose ABI that data source lacks, a path the real deployment last took in 2020 |
+| `QmcE8R…` | Ethereum | ENS | fails on A: needs graph-node's ENS rainbow table |
+
+The two failures are graph-node refusing the subgraph started mid-history,
+before waxwing is involved. The second is worth knowing for a handover all
+the same: a receiver without `ens_names` loaded restores an ENS deployment
+and then fails on its next block.
+
+File data sources are covered by the rig instead: none of the network's
+was active on a chain GraphOps serves. The rig subgraph reads a note from
+IPFS every tenth ping, and `fast-restore.sh` carries the off-chain entities
+and their data sources across identical.
+
+Things the corpus ran into on the way, all handled in `corpus.sh`:
+graph-node v0.45 takes one IPFS server, not a list; it refuses a deployment
+needing an archive-capable provider without marking it unhealthy; a
+block-handler subgraph fetches every block in its window; and on Linux
+`graphman dump` writes as root.
 
 `rig/reorg.sh` puts a reorg between the full dump and the incremental one.
 graphman accepts it, because the head number advanced, and the restored copy
