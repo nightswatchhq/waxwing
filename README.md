@@ -38,7 +38,7 @@ between indexers. waxwing makes that safe to rely on, and faster:
 Install (Rust 1.88 or later):
 
 ```
-cargo install --git https://github.com/nightswatchhq/waxwing
+cargo install --git https://github.com/nuthatch-org/waxwing
 ```
 
 On the indexer handing the deployment over:
